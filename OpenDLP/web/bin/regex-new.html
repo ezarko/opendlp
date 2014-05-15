@@ -1,0 +1,190 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+
+my $version = get_version();
+
+my $MAX_LENGTH_REGEX_NAME = 64;
+my $MAX_LENGTH_REGEX = 65535;
+my $db_admin_file = "../etc/db_admin";
+
+my $is_valid = 1;
+my( $regex_name, $pattern ) = "";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+my ($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if( request_method() ne "POST" )
+{
+	$is_valid = 0;
+	print "Only POST requests are allowed. Try starting <a href=profiles.html>here</a>.<br>\n";
+}
+
+foreach $p (param())
+{
+	$form{$p} = param($p);
+
+	if( $p eq "regex_name" )
+	{
+		$regex_name = $form{$p};
+		if( length( $regex_name ) > $MAX_LENGTH_REGEX_NAME )
+		{
+			$is_valid = 0;
+			print "Regex name is too long. Limit it to $MAX_LENGTH_REGEX_NAME characters.<br><br>\n";
+		}
+		if( $regex_name !~ /^[a-z0-9\-\_]+$/i )
+		{
+			$is_valid = 0;
+			print "Profile cannot be blank and can only contain the following characters: A-Za-z0-9-_<br><br>\n";
+		}
+	}
+
+	if( $p eq "regex" )
+	{
+		$regex = $form{$p};
+		if( length( $regex ) > $MAX_LENGTH_REGEX )
+		{
+			$is_valid = 0;
+			print "Regex is too long. Limit it to $MAX_LENGTH_REGEX characters.<br><br>\n";
+		}
+		if( $regex eq "" || $regex =~ /^\ +$/ )
+		{
+			$is_valid = 0;
+			print "Regex cannot be blank.<br><br>\n";
+		}
+	}
+}
+
+if( $is_valid )
+{
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+	my $string = "SELECT name from regexes where name=?;";
+	my $sth = $dbh->prepare( $string );
+	$sth->execute( $regex_name );
+	my $results = $sth->fetchrow_arrayref();
+	if( $$results[0] eq "" )
+	{
+		$string = "INSERT INTO regexes SET name=?,pattern=?;";
+		$sth = $dbh->prepare($string);
+		$sth->execute($regex_name, $regex);
+
+		print "<heading>New Regex Submission</heading>:<br><br>\n";
+		print "<table class=sample>\n";
+		print "<tr><td width=200>Regex Name</td><td>$regex_name</td></tr>\n";
+		my $regex_copy = filter( $regex );
+		print "<tr><td>Regex</td><td>$regex_copy</td></tr>\n";
+		print "</table>\n";
+	}
+	else
+	{
+		print "Duplicate regex name found. Try again with a different regex name.\n\n";
+	}
+	$sth->finish;
+	$dbh->disconnect;
+
+}
+
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'regex\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub filter
+{
+	my $thing = shift;
+	$thing =~ s/\&/\&amp;/g;
+	$thing =~ s/\#/&#35;/g;
+	$thing =~ s/"/&#34;/g;
+	$thing =~ s/\%/&#37;/g;
+	$thing =~ s/\'/&#39;/g;
+	$thing =~ s/\//&#47;/g;
+	$thing =~ s/</&#60;/g;
+	$thing =~ s/>/&#62;/g;
+	$thing =~ s/\[/&#91;/g;
+	$thing =~ s/\\/&#92;/g;
+	$thing =~ s/\]/&#93;/g;
+	$thing =~ s/`/&#96;/g;
+	$thing =~ s/{/&#123;/g;
+	$thing =~ s/\|/&#124;/g;
+	$thing =~ s/}/&#125;/g;
+	return $thing;
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

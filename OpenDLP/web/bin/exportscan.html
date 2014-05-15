@@ -1,0 +1,563 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+use XML::Writer;
+use MIME::Base64;
+
+my $version = get_version();
+my $db_admin_file = "../etc/db_admin";
+my $is_valid = 1;
+my %systems = ();
+my $printme_error = "";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+my ($db_username, $db_password) = split( ":", $db_line );
+my $query = CGI->new;
+my $scanname = $query->param('scanname');
+if( $scanname ne "" && $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+{
+	$is_valid = 0;
+	$printme_error .= "Invalid scan name<br><br>\n";
+}
+
+if( !$is_valid )
+{
+	header();
+	print $printme_error;
+	footer();
+}
+elsif( $is_valid )
+{
+
+	# if no arguments are given
+	if( $scanname eq "" )
+	{
+		header();
+		print "<heading>Export Results as XML</heading><br><br>\n";
+		my %scans = ();
+
+		print "On this screen, you can export your scan results as XML.<br><br>\n";
+		print "<form method=GET action=exportscan.html>\n";
+		print "<table border=1 cellpadding=1 cellspacing=1>\n";
+		print "<tr><td>Export</td><td>Scan name</td><td>Scan type</td><td>Finished</td><td>Running</td><td>Paused</td><td>Uninstalled</td><td>Total</td></tr>\n";
+
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT DISTINCT scan,ip,control,scantype FROM systems";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute();
+		while( my $results = $sth->fetchrow_arrayref() )
+		{
+			if( $$results[2] eq "running" )
+			{
+				$scans{$$results[0]}{running}++;
+			}
+			elsif( $$results[2] eq "finished" )
+			{
+				$scans{$$results[0]}{finished}++;
+			}
+			elsif( $$results[2] eq "stopped" )
+			{
+				$scans{$$results[0]}{stopped}++;
+			}
+			elsif( $$results[2] eq "uninstalled" )
+			{
+				$scans{$$results[0]}{uninstalled}++;
+			}
+			$scans{$$results[0]}{scantype} = $$results[3];
+		}
+		foreach my $scankey( sort( keys( %scans )))
+		{
+			my $total = $scans{$scankey}{running} + $scans{$scankey}{finished} + $scans{$scankey}{stopped} + $scans{$scankey}{uninstalled};
+			print "<tr><td><input type=radio name=scanname value=\"$scankey\"></td>\n";
+			print "<td>$scankey</td>\n";
+			print "<td>$scans{$scankey}{scantype}</td>\n";
+
+			# Finished
+			if( $scans{$scankey}{finished} == 0 )
+			{
+				print "<td>0</td>\n";
+			}
+			else
+			{
+				print "<td>$scans{$scankey}{finished}</td>\n";
+			}
+
+			# Running
+			if( $scans{$scankey}{running} == 0 )
+			{
+				print "<td>0</td>\n";
+			}
+			else
+			{
+				print "<td>$scans{$scankey}{running}</td>\n";
+			}
+
+			# Paused
+			if( $scans{$scankey}{stopped} == 0 )
+			{
+				print "<td>0</td>\n";
+			}
+			else
+			{
+				print "<td>$scans{$scankey}{stopped}</td>\n";
+			}
+
+			# Uninstalled
+			if( $scans{$scankey}{uninstalled} == 0 )
+			{
+				print "<td>0</td>\n";
+			}
+			else
+			{
+				print "<td>$scans{$scankey}{uninstalled}</td>\n";
+			}
+
+			print "<td>$total</td>\n";
+			print "</tr>\n";
+		}
+		print "<tr><td colspan=8><input type=submit value=\"Export Scan Details\"</td></tr>\n";
+		print "</table></form>\n";
+		footer();
+	}
+
+	# if scanname is given as an argument, but not system
+	elsif( $scanname ne "" )
+	{
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT profile FROM systems WHERE scan=? LIMIT 1";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $scanname );
+		my $results = $sth->fetchrow_arrayref();
+		my $profile = $$results[0];
+
+		# get profile info for XML file
+		my $string = "SELECT exts,ignore_exts,dirs,ignore_dirs,regex,path,phonehomeurl,delaytime,debug,concurrent,creditcards,zipfiles,memory,mask,ignore_dbs,dbs,ignore_tables,tables,ignore_columns,columns,rows,scantype from profiles where profile=?";
+		$sth = $dbh->prepare( $string );
+		$sth->execute( $profile );
+		my $results = $sth->fetchrow_arrayref();
+		my @exts = split( "\n", $$results[0] );
+		my $ignore_exts = $$results[1];
+		my @dirs = split( "\n", $$results[2] );
+		my $ignore_dirs = $$results[3];
+		my @regex_numbers = split( ",", $$results[4] );
+		my $path = $$results[5];
+		my $phonehomeurl = $$results[6];
+		my $delaytime = $$results[7];
+		my $debug = $$results[8];
+		my $concurrent = $$results[9];
+		my @creditcards = split( "\n", $$results[10] );
+		my @zipfiles = split( "\n", $$results[11] );
+		my $memory = $$results[12];
+		my $mask = $$results[13];
+		my $ignore_dbs = $$results[14];
+		my @dbs = split( "\n", $$results[15] );
+		my $ignore_tables = $$results[16];
+		my @tables = split( "\n", $$results[17] );
+		my $ignore_columns = $$results[18];
+		my @columns = split( "\n", $$results[19] );
+		my $rows = $$results[20];
+		my $scantype = $$results[21];
+
+		my $xml = "";
+		my $writer = new XML::Writer( OUTPUT => \$xml );
+		$writer->xmlDecl();
+		$writer->startTag( "OpenDLP", "version" => "$version" );
+		  $writer->startTag( "scanname" );
+		    $writer->characters( $scanname );
+		  $writer->endTag( "scanname" );
+
+		  # begin profile
+		  $writer->startTag( "profile" );
+		    $writer->startTag( "name" );
+		      $writer->characters( $profile );
+		    $writer->endTag( "name" );
+		    $writer->startTag( "extension_option" );
+		      $writer->characters( $ignore_exts );
+		    $writer->endTag( "extension_option" );
+		    foreach( @exts )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "extension" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "extension" );
+		    }
+		    $writer->startTag( "directory_option" );
+		      $writer->characters( $ignore_dirs );
+		    $writer->endTag( "directory_option" );
+		    foreach( @dirs )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "directory" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "directory" );
+		    }
+		    foreach( @regex_numbers )
+		    {
+			my $string = "SELECT name,pattern from regexes where number=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $_ );
+			my $results = $sth->fetchrow_arrayref();
+			$writer->startTag( "regex" );
+			  $writer->startTag( "name" );
+			    $writer->characters( $$results[0] );
+			  $writer->endTag( "name" );
+			  $writer->startTag( "pattern" );
+			    $writer->characters( $$results[1] );
+			  $writer->endTag( "pattern" );
+			$writer->endTag( "regex" );
+		    }
+		    foreach( @creditcards )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "creditcardregex" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "creditcardregex" );
+		    }
+		    foreach( @zipfiles )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "zipext" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "zipext" );
+		    }
+		    $writer->startTag( "path" );
+		      $writer->characters( $path );
+		    $writer->endTag( "path" );
+		    $writer->startTag( "delaytime" );
+		      $writer->characters( $delaytime );
+		    $writer->endTag( "delaytime" );
+		    $writer->startTag( "log_verbosity" );
+		      $writer->characters( $debug );
+		    $writer->endTag( "log_verbosity" );
+		    $writer->startTag( "debug" );
+		      $writer->characters( $debug );
+		    $writer->endTag( "debug" );
+		    $writer->startTag( "concurrent" );
+		      $writer->characters( $concurrent );
+		    $writer->endTag( "concurrent" );
+		    $writer->startTag( "memceiling" );
+		      $writer->characters( $memory );
+		    $writer->endTag( "memceiling" );
+		    $writer->startTag( "masksensitive" );
+		      $writer->characters( $mask );
+		    $writer->endTag( "masksensitive" );
+		    $writer->startTag( "ignoredbs_option" );
+		      $writer->characters( $ignore_dbs );
+		    $writer->endTag( "ignoredbs_option" );
+		    foreach( @dbs )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "database" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "database" );
+		    }
+		    $writer->startTag( "ignoretables_option" );
+		      $writer->characters( $ignore_tables );
+		    $writer->endTag( "ignoretables_option" );
+		    foreach( @tables )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "table" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "table" );
+		    }
+		    $writer->startTag( "ignorecolumns_option" );
+		      $writer->characters( $ignore_columns );
+		    $writer->endTag( "ignorecolumns_option" );
+		    foreach( @columns )
+		    {
+		      $_ =~ s/\r//g;
+		      $_ =~ s/\n//g;
+		      $writer->startTag( "column" );
+		        $writer->characters( $_ );
+		      $writer->endTag( "column" );
+		    }
+		    $writer->startTag( "maxrows" );
+		      $writer->characters( $rows );
+		    $writer->endTag( "maxrows" );
+		    $writer->startTag( "scantype" );
+		      $writer->characters( $scantype );
+		    $writer->endTag( "scantype" );
+
+		  $writer->endTag( "profile" );
+		# end profile
+
+		# start results listed by system
+		  $writer->startTag( "systems" );
+		    my $string = "SELECT system,domain,ip,filestotal,filesdone,bytestotal,bytesdone,status,updated,tracker,control,pid,dbtotal,dbdone,tabletotal,tabledone,columntotal,columndone,scantype from systems where profile=? and scan=?";
+		    $sth = $dbh->prepare( $string );
+		    $sth->execute( $profile, $scanname );
+		    while( my $results = $sth->fetchrow_arrayref() )
+		    {
+		      my $netbios = $$results[0];
+		      my $workgroup = $$results[1];
+		      my $ip = $$results[2];
+		      my $filestotal = $$results[3];
+		      my $filesdone = $$results[4];
+		      my $bytestotal = $$results[5];
+		      my $bytesdone = $$results[6];
+		      my $status = $$results[7];
+		      my $updated = $$results[8];
+		      my $tracker = $$results[9];
+		      my $control = $$results[10];
+		      my $pid = $$results[11];
+		      my $dbtotal = $$results[12];
+		      my $dbdone = $$results[13];
+		      my $tabletotal = $$results[14];
+		      my $tabledone = $$results[15];
+		      my $columntotal = $$results[16];
+		      my $columndone = $$results[17];
+		      my $scantype = $$results[18];
+
+		      $writer->startTag( "system", "tracker" => $tracker );
+		        $writer->startTag( "system_name" );
+			  $writer->characters( $netbios );
+		        $writer->endTag( "system_name" );
+			$writer->startTag( "workgroup" );
+			  $writer->characters( $workgroup );
+			$writer->endTag( "workgroup" );
+			$writer->startTag( "ip" );
+			  $writer->characters( $ip );
+			$writer->endTag( "ip" );
+			$writer->startTag( "filestotal" );
+			  $writer->characters( $filestotal );
+			$writer->endTag( "filestotal" );
+			$writer->startTag( "filesdone" );
+			  $writer->characters( $filesdone );
+			$writer->endTag( "filesdone" );
+			$writer->startTag( "bytestotal" );
+			  $writer->characters( $bytestotal );
+			$writer->endTag( "bytestotal" );
+			$writer->startTag( "bytesdone" );
+			  $writer->characters( $bytesdone );
+			$writer->endTag( "bytesdone" );
+			$writer->startTag( "scanner_step" );
+			  $writer->characters( $status );
+			$writer->endTag( "scanner_step" );
+			$writer->startTag( "updated" );
+			  $writer->characters( $updated );
+			$writer->endTag( "updated" );
+			$writer->startTag( "control" );
+			  $writer->characters( $control );
+			$writer->endTag( "control" );
+
+			$writer->startTag( "pid" );
+			  $writer->characters( $pid );
+			$writer->endTag( "pid" );
+			$writer->startTag( "dbtotal" );
+			  $writer->characters( $dbtotal );
+			$writer->endTag( "dbtotal" );
+			$writer->startTag( "dbdone" );
+			  $writer->characters( $dbdone );
+			$writer->endTag( "dbdone" );
+			$writer->startTag( "tabletotal" );
+			  $writer->characters( $tabletotal );
+			$writer->endTag( "tabletotal" );
+			$writer->startTag( "tabledone" );
+			  $writer->characters( $tabledone );
+			$writer->endTag( "tabledone" );
+			$writer->startTag( "columntotal" );
+			  $writer->characters( $columntotal );
+			$writer->endTag( "columntotal" );
+			$writer->startTag( "columndone" );
+			  $writer->characters( $columndone );
+			$writer->endTag( "columndone" );
+			$writer->startTag( "scantype" );
+			  $writer->characters( $scantype );
+			$writer->endTag( "scantype" );
+			# end of general system information
+
+			# results
+			$writer->startTag( "results" );
+		        my $string = "SELECT type,pattern,file,offset,md5,db,tbl,col,row from results where scan=? and tracker=? and is_false != \"1\"";
+		        my $sth2 = $dbh->prepare( $string );
+		        $sth2->execute( $scanname, $tracker );
+		        while( my $results2 = $sth2->fetchrow_arrayref() )
+		        {
+		          my $type = $$results2[0];
+		          my $pattern = $$results2[1];
+		          my $file = $$results2[2];
+		          my $offset = $$results2[3];
+		          my $md5 = $$results2[4];
+		          my $db = $$results2[5];
+		          my $tbl = $$results2[6];
+		          my $col = $$results2[7];
+		          my $row = $$results2[8];
+
+			  $writer->startTag( "result" );
+			    $writer->startTag( "type" );
+			      $writer->characters( $type );
+			    $writer->endTag( "type" );
+			    $writer->startTag( "raw_pattern_base64" );
+			      my $base64_pattern = encode_base64( $pattern );
+			      $base64_pattern =~ s/\n//g;
+			      $writer->characters( $base64_pattern );
+			    $writer->endTag( "raw_pattern_base64" );
+			    $writer->startTag( "filtered_pattern" );
+			      my $filtered_pattern = filterme( $pattern );
+			      $writer->characters( $filtered_pattern );
+			    $writer->endTag( "filtered_pattern" );
+			    $writer->startTag( "file" );
+			      my $file_printme = $file;
+			      $file_printme =~ s/\\\\/\\/g;
+			      $writer->characters( $file_printme );
+			    $writer->endTag( "file" );
+			    $writer->startTag( "offset" );
+			      $writer->characters( $offset );
+			    $writer->endTag( "offset" );
+			    $writer->startTag( "md5" );
+			      $writer->characters( $md5 );
+			    $writer->endTag( "md5" );
+			    $writer->startTag( "database" );
+			      $writer->characters( $db );
+			    $writer->endTag( "database" );
+			    $writer->startTag( "table" );
+			      $writer->characters( $tbl );
+			    $writer->endTag( "table" );
+			    $writer->startTag( "column" );
+			      $writer->characters( $col );
+			    $writer->endTag( "column" );
+			    $writer->startTag( "row" );
+			      $writer->characters( $row );
+			    $writer->endTag( "row" );
+			  $writer->endTag( "result" );
+			}
+			$sth2->finish();
+			$writer->endTag( "results" );
+		      $writer->endTag( "system" );
+		    }
+		  $writer->endTag( "systems" );
+		$writer->endTag( "OpenDLP" );
+		$writer->end();
+		$sth->finish();
+
+		$dbh->disconnect();
+
+		my $length_xml = length( $xml );
+		my $localtime = time();
+		my $filename = "OpenDLP-" . $scanname . "-" . $localtime . ".xml";
+
+		print "Content-Length: $length_xml\n";
+		print "Content-Type: text/xml\n";
+		print "Content-Disposition: attachment; filename=$filename\n\n";
+		print $xml;
+	}
+}
+
+sub filterme
+{
+	my $text = shift;
+	my $filtered = "";
+	
+	for( my $x = 0; $x < length( $text ); $x++ )
+	{
+		my $char = substr( $text, $x, 1 );
+		if( $char !~ /[0-9A-Z\~\`\!\@\#\$\%\^\&\*\(\)\_\-\=\+\[\{\]\}\\\|\;\:\'\"\,\<\.\>\/\?\ ]/i )
+		{
+			$filtered .= "?";
+		}
+		else
+		{
+			$filtered .= $char;
+		}
+	}
+	return $filtered;
+}
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+
+# make a fancy false positive interface in the next release
+#	print qq {
+#
+#	<script language="JavaScript">
+#	function fp(id, type, pattern, file, offset, md5)
+#	{
+#		var id_check = document.getElementById( id );
+#		if( id_check.checked == true )
+#		{
+#			alert(id + type + pattern + file + offset + md5);
+#		}
+#	}
+#	</script>
+#	};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub replacechars
+{
+	my $string = shift;
+
+	$string =~ s/\&/\&amp;/g;
+	$string =~ s/\#/&#35;/g;
+	$string =~ s/"/&#34;/g;
+	$string =~ s/\%/&#37;/g;
+	$string =~ s/\'/&#39;/g;
+	$string =~ s/\//&#47;/g;
+	$string =~ s/</&#60;/g;
+	$string =~ s/>/&#62;/g;
+	$string =~ s/\[/&#91;/g;
+	$string =~ s/\\/&#92;/g;
+	$string =~ s/\]/&#93;/g;
+	$string =~ s/`/&#96;/g;
+	$string =~ s/{/&#123;/g;
+	$string =~ s/\|/&#124;/g;
+	$string =~ s/}/&#125;/g;
+	$string =~ s/\n//g;
+	$string =~ s/\r//g;
+	$string =~ s/\ /&nbsp;/g;
+
+	return $string;
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

@@ -1,0 +1,624 @@
+====================
+0. Table of Contents
+====================
+1.  Overview
+2.  Requirements
+3.  SSL Certificate Setup
+4.  Apache Configuration
+5.  MySQL Configuration
+6.  Web Application Configuration
+7.  Perl Configuration
+8.  Web Server Operating System Configuration
+9.  Browser Configuration
+10. Metasploit Configuration
+11. Upgrading from version 0.1 to version 0.2
+12. Upgrading from version 0.2.3 to version 0.2.4
+13. Upgrading from version 0.2.4 to version 0.2.5
+14. Upgrading from version 0.2.5 to version 0.2.6
+15. Upgrading from version 0.2.6 to version 0.3
+16. Upgrading from version 0.3 to version 0.3.1
+17. Upgrading from version 0.3.2 to version 0.4
+18. Upgrading from version 0.4.4 to version 0.5
+
+===========
+1. Overview
+===========
+OpenDLP is a free and open source, agent-based, centrally-managed, massively
+distributable data loss prevention tool released under the GPL. OpenDLP can
+identify sensitive data at rest on thousands of systems simultaneously. OpenDLP
+has two components:
+
+Web Application
+- Automatically deploy and start agents over Netbios
+- When done, automatically stop, uninstall, and delete agents over Netbios
+- Pause, resume, and forcefully uninstall agents in an entire scan or on
+  individual systems
+- Concurrently and securely receive results from hundreds or thousands of
+  deployed agents
+- Create Perl-compatible regular expressions (PCREs) for finding sensitive data
+  at rest
+- Create reusable profiles for scans that include whitelisting or blacklisting
+  directories and file extensions
+- Review findings and identify false positives
+- Export results as XML
+- Writen in Perl with MySQL backend
+
+Agent
+- Runs on Windows 2000 and later systems
+- Written in C with no .NET Framework requirements
+- Runs as a Windows Service at low priority so users do not see or feel it
+- Resumes automatically upon system reboot with no user interaction
+- Securely transmit results to web application at user-defined intervals over
+  two-way-trusted SSL connection
+- Uses PCREs to identify sensitive data inside files
+- Performs additional checks on potential credit card numbers to reduce false
+  positives
+- Can read inside ZIP files, including Office 2007 and OpenOffice files
+- Limits itself to a percent of physical memory so there is no thrashing when
+  processing large files
+- Can be used with existing Meterpreter sessions
+
+In addition to performing data discovery on Windows operating systems, OpenDLP
+also supports performing agentless data discovery against the following
+databases:
+- Microsoft SQL server
+- MySQL
+
+For Microsoft SQL server, OpenDLP supports authenticating either with SQL server
+credentials (the "sa" account, for example) or with Windows OS (domain)
+credentials.
+
+Agentless File System and File Share Scans
+With OpenDLP 0.4, one can perform the following scans:
+- Agentless Windows file system scan (over SMB)
+- Agentless Windows share scan (over SMB)
+- Agentless UNIX file system scan (over SSH using sshfs)
+
+OpenDLP is copyright Andrew Gavin (andrew.opendlp@gmail.com) 2009-2012.
+
+===============
+2. Requirements
+===============
+- Apache 2.x (tested with 2.2.10)
+- MySQL (tested with 5.0.70)
+- Samba (tested with 3.0.33)
+- winexe (http://eol.ovh.org/winexe/) somewhere in $PATH
+  Note: If you want pass-the-hash (PTH) support (added in OpenDLP 0.2.6), you
+  must patch winexe so it supports PTH. Patch is here:
+  http://www.foofus.net/~jmk/passhash.html
+- Perl (tested with 5.8.8)
+- Additional Perl modules (see under "Perl Configuration")
+- 32-bit "sc.exe" from a Windows 2000/XP system (not Vista/7)
+- FreeTDS
+  Note: Additional OS requirements might be necessary. Ubuntu users, you might
+  have to do this step first before FreeTDS works:
+  apt-get install tdsodbc
+- For agentless scans, an "unzip" binary somewhere in $PATH.
+- Meterpreter support requires a working Metasploit installation
+
+
+========================
+3. SSL Certificate Setup
+========================
+# taken from http://hausheer.osola.com/docs/9
+# Create an RSA server key
+openssl genrsa -des3 -out server.key 1024
+
+# Remove the passphrase
+openssl rsa -in server.key -out server.key
+
+# Create a self-signed X509 certificate. O, OU, CN must be same as CA stuff
+openssl req -new -key server.key -x509 -out server.crt -days 1825
+
+# Setup a new CA. O, OU, CN must be same as server keys
+/etc/ssl/misc/CA.pl -newca
+Ubuntu: /usr/lib/ssl/misc/CA.pl -newca
+
+# Create a client key
+openssl genrsa -out client.key 1024
+
+# Create a certificate request. O must be same. OU and CN must be different!
+openssl req -new -key client.key -out client.csr
+
+# Sign the certificate request.
+openssl ca -in client.csr -cert server.crt -keyfile server.key -out client.crt -days 9999
+
+# Create PKCS12 file. Distribute this to other OpenDLP admins for use in their
+  browsers.
+openssl pkcs12 -export -in client.crt -inkey client.key -out client.p12
+
+# Remove password, convert to pkcs12 to PEM
+# client.pem is distributed to systems
+openssl pkcs12 -in client.p12 -out client.pem -nodes
+
+# convert server.crt/server.key to server.p12
+openssl pkcs12 -export -in server.crt -inkey server.key -out server.p12
+
+# Remove password, convert to pkcs12 to PEM
+# server.pem is distributed to systems
+openssl pkcs12 -in server.p12 -out server.pem -nodes
+
+# Copy client.pem and server.pem to the web server at:
+# /var/www/localhost/OpenDLP/bin
+
+=======================
+4. Apache Configuration
+=======================
+Add the following to your Apache configuration file. You will want to create an
+htaccess user to protect the contents of this application.
+
+Alias /OpenDLP/images/ /var/www/localhost/OpenDLP/web/bin/images/
+<Directory "/var/www/localhost/OpenDLP/web/bin/images/">
+        Options FollowSymLinks
+        AllowOverride None
+        order allow,deny
+        allow from all
+        AuthType Basic
+        AuthName "OpenDLP"
+        AuthUserFile /etc/apache2/.htpasswd.dlp.user
+        Require user dlpuser
+</Directory>
+ScriptAlias /OpenDLP/ /var/www/localhost/OpenDLP/web/bin/
+<Directory "/var/www/localhost/OpenDLP/web/bin/results/">
+        Options FollowSymLinks
+        AllowOverride None
+        order allow,deny
+        allow from all
+        AuthType Basic
+        AuthName "OpenDLP"
+        AuthUserFile /etc/apache2/.htpasswd.dlp.agent
+        Require user ddt
+</Directory>
+<Directory "/var/www/localhost/OpenDLP/web/bin/">
+        Options FollowSymLinks
+        AllowOverride None
+        order allow,deny
+        allow from all
+        AuthType Basic
+        AuthName "OpenDLP"
+        AuthUserFile /etc/apache2/.htpasswd.dlp.user
+        Require user dlpuser
+</Directory>
+
+Also add this stuff to the Apache config file:
+# taken from http://hausheer.osola.com/docs/9
+SSLVerifyClient require
+SSLCertificateFile /path/to/server.crt
+SSLCertificateKeyFile /path/to/server.key
+SSLCACertificateFile /path/to/server.crt
+
+Modify your /etc/apache2/vhosts.d/00_default_ssl_vhost.conf file so that it
+points to the correct "crt" and "key" files.
+
+- Recursively put OpenDLP's "OpenDLP/web/bin/" files into
+  "/var/www/localhost/OpenDLP/web/bin/".
+- Put OpenDLP's "OpenDLP/web/etc/" files into
+  "/var/www/localhost/OpenDLP/web/etc/".
+- Put OpenDLP's "OpenDLP/bin/" files into "/var/www/localhost/OpenDLP/bin/".
+- Put OpenDLP's "OpenDLP/perl_modules" files into "/usr/lib/perl5" (or somewhere
+  else visible to Perl in its path "@INC")
+
+Run "htpasswd" or "htpasswd2" to create the files:
+- /etc/apache2/.htpasswd.dlp.user
+- /etc/apache2/.htpasswd.dlp.agent
+".htpasswd.dlp.agent" will be used when you create policies. This will be your
+  username and password for the "phonehomeuser" and "phonehomepassword" options.
+".htpasswd.dlp.user" will be used for you to authenticate to the web
+  application. 
+
+
+======================
+5. MySQL Configuration
+======================
+You must create OpenDLP's database and table structures with the following
+commands:
+
+1.  Authenticate to MySQL as your root user.
+2.  mysql> CREATE DATABASE OpenDLP;
+3.  mysql> USE OpenDLP;
+4.  mysql> CREATE TABLE profiles (profile VARCHAR(64), username VARCHAR(128),\
+    password VARCHAR(255), domain VARCHAR(255), exts TEXT, ignore_exts \
+    VARCHAR(10), dirs TEXT, ignore_dirs VARCHAR(10), regex TEXT, path TINYTEXT,\
+    phonehomeurl VARCHAR(255), phonehomeuser VARCHAR(32), phonehomepass \
+    VARCHAR(32), delaytime SMALLINT UNSIGNED, description VARCHAR(128), \
+    debug SMALLINT UNSIGNED, number SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT, \
+    primary key (number), concurrent SMALLINT UNSIGNED, creditcards TEXT, \
+    zipfiles TEXT, memory FLOAT, mask BOOL, hash VARCHAR(65), ignore_dbs \
+    VARCHAR(10), dbs TEXT, ignore_tables VARCHAR(10), tables TEXT, \
+    ignore_columns VARCHAR(10), columns TEXT, rows BIGINT, scantype \
+    VARCHAR(20), metaport bigint(20) unsigned, metalatency bigint(20) unsigned,\
+    metauser varchar(65), metapass varchar(65), metapath varchar(255), \
+    metatimeout int(11), metassl tinyint(1));
+5.  mysql> CREATE TABLE systems (scan VARCHAR(64), system VARCHAR(255), domain\
+    VARCHAR(255), ip VARCHAR(40), filestotal INT, filesdone INT, bytestotal\
+    BIGINT, bytesdone BIGINT, status VARCHAR(10), updated VARCHAR(12), \
+    tracker VARCHAR(32), profile VARCHAR(64), control VARCHAR(16), pid \
+    SMALLINT UNSIGNED, dbtotal INT, dbdone INT, tabletotal INT, tabledone INT, \
+    columntotal INT, columndone INT, scantype VARCHAR(20), sessionid \
+    varchar(65));
+6.  mysql> CREATE TABLE results (scan VARCHAR(64), system VARCHAR(64), domain \
+    VARCHAR(255), type VARCHAR(64), pattern VARCHAR(255), file VARCHAR(8096),\
+    offset BIGINT UNSIGNED, md5 VARCHAR(32), tracker VARCHAR(32), number \
+    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, primary key (number), is_false \
+    TINYINT, db VARCHAR(256), tbl VARCHAR(256), col VARCHAR(256), row BIGINT \
+    UNSIGNED);
+7.  mysql> CREATE TABLE regexes (name VARCHAR(64), pattern TEXT, number \
+    SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT, primary key (number));
+8.  mysql> CREATE TABLE falsepositives (scan VARCHAR(64), tracker VARCHAR(32), \
+    domain VARCHAR(255), type VARCHAR(64), file VARCHAR(8096), offset BIGINT \
+    UNSIGNED, md5 VARCHAR(32));
+9.  mysql> CREATE TABLE logs (tracker VARCHAR(32), line INT UNSIGNED, data \
+    VARCHAR(255), updated VARCHAR(18), scan VARCHAR(64), profile VARCHAR(64));
+10. mysql> create table agentless (tracker varchar(32), scan varchar(64), file \
+    varchar(8096));
+11. mysql> create table agentless_zip (tracker varchar(32), scan varchar(64), \
+    unzipdir varchar(64));
+12. mysql> create table agentless_mount (tracker varchar(32), scan varchar(64),\
+    mountdir varchar(64));
+
+Populate the database with some default regexes. The credit card regex names are
+hardcoded into the client, so use these same names in the database. The client
+does mod10 checks on matches (to cut down on false positives) and needs to know
+that the following regexes are credit cards.
+
+1. mysql> load data infile \
+  '/var/www/localhost/OpenDLP/web/etc/default_regexes' into table regexes \
+  fields terminated by ':';
+
+WARNING: This file contains a social security number regex,
+"Social_Security_Number", that could lead to a high rate of false positives if
+you use it during a Windows filesystem scan. It is recommended to only use this
+regex during database scans.
+
+You will need to create a MySQL user for OpenDLP. Replace "OpenDLP" and
+"password" with whatever you like. Keep in mind that OpenDLP's tables will
+likely contain sensitive information, so use strong authentication
+credentials. These credentials are not distributed with the agent to Windows
+systems, they are only kept on the web server.
+
+1. mysql> create user 'OpenDLP'@'localhost' identified by 'password';
+2. mysql> grant all privileges on OpenDLP.* to 'OpenDLP'@'localhost';
+
+
+================================
+6. Web Application Configuration
+================================
+1. Edit "/var/www/localhost/OpenDLP/etc/db_admin" so it contains the MySQL
+   authentication credentials delimited by a colon.  Example:
+   OpenDLP:password
+2. Copy a 32-bit Microsoft Windows 2000/XP "sc.exe" to
+   "/var/www/localhost/OpenDLP/bin/". OpenDLP uses this to install the agent as
+   a Windows service on Windows systems. It cannot be distributed with OpenDLP
+   because of licensing issues. "sc.exe" is freely available from Microsoft, so
+   use The Google to find it.
+3. Copy the two EXE and three PL files in "OpenDLP/bin" to
+   "/var/www/localhost/OpenDLP/bin".
+
+
+=====================
+7. Perl Configuration
+=====================
+OpenDLP requires the following modules:
+1.  CGI
+2.  DBI
+3.  Filesys::SmbClient
+4.  Proc::Queue
+5.  XML::Writer
+6.  MIME::Base64
+7.  DBD::Sybase (this link is helpful: http://www.perlmonks.org/?node_id=392385)
+8.  Algorithm::LUHN
+9.  Time::HiRes
+10. Digest::MD5
+11. File::Path
+12. Archive::Extract
+13. Archive::Zip
+14. Data::MessagePack (might also install ExtUtils::MakeMaker and
+    ExtUtils::ParseXS)
+
+
+============================================
+8. Web Server Operating System Configuration
+============================================
+1. Copy "winexe" so it is somewhere in Apache's $PATH. "/usr/bin" is a good
+   start.
+2. For UNIX agentless scans, install the "sshfs" package.
+   Ubuntu users: apt-get install sshfs
+3. For UNIX agentless scans, add "opendlp" and the web server user ("www-data"
+   on Ubuntu, "apache" on other distros) to the "fuse" group.
+   A. Ubuntu users: sudo gpasswd -a opendlp fuse
+                    sudo gpasswd -a www-data fuse
+   B. Other distros: Just edit the file "/etc/group"
+4. Optional: You may want to put the MySQL tables on a Truecrypt volume. This
+   is out of scope for this tool, but documentation is available on Truecrypt's
+   website on how to configure this.
+
+
+========================
+9. Browser Configuration
+========================
+1. Firefox
+	A. Go to Firefox's preferences
+	B. Go to the "Advanced" tab
+	C. Go to the "Encryption" sub-tab
+	D. Click the "View Certificates" button
+	E. In the "Certificate Manager" window, go to the "Your Certificates"
+           tab
+	F. Click the "Import..." button
+	G. Find the "client.p12" file and import it
+
+
+===============================================
+10. Metasploit Configuration and Basic Guidance
+===============================================
+1. Configuration
+   Copy "OpenDLP/metasploit_modules/opendlp.rb" to your Metasploit system's
+   Metasploit directory "msf3/modules/post/windows/gather" (Backtrack 5 users:
+   This directory is "/opt/metasploit/msf3/modules/post/windows/gather")
+
+2. Basic Guidance (this has been tested on Metasploit 4.4.0-dev)
+	A. On your Metasploit box, start msfrpcd:
+           msfrpcd -S -a non-loopback_address -P a_password -U a_username -f
+		1) It is important to specify a non-loopback address so OpenDLP
+                   can connect to it.
+		2) By default, msfrpcd uses loopback, which will not work.
+	B. On your Metasploit box, start msfgui
+	C. Inside msfgui, go to the menu "File" -> "Connect to msfrpcd"
+	D. Populate username, password, host, and port; click "Connect"
+	E. Exploit a Windows box. The following is a basic example:
+		1) Go to the menu "Exploits" -> "windows" -> "smb" -> "psexec"
+		2) A new window will display titled "Microsoft Windows
+		   Authenticated User Code Execution"
+		3) Select the "Automatic" target radio button
+		4) Select the "windows" -> "meterpreter" -> "reverse_tcp"
+		   payload (it is required to use a "meterpreter" payload for
+		   OpenDLP to work)
+		5) Populate the "RHOST", "SMBUser", "SMBPass", and "SMBDomain"
+		   fields
+		6) Click "Run Exploit" directly below the "RHOST" field
+	F. One-time only: Copy the file
+	   "OpenDLP/metasploit_modules/opendlp.rb" to your Metasploit box. It
+	   should go in Metasploit's directory
+	   "msf3/modules/post/windows/gather"
+	   (Backtrack 5 users: This directory is
+           "/opt/metasploit/msf3/modules/post/windows/gather")
+	G. In your OpenDLP web browser, create a new profile for "Metasploit
+	   (agent) - Meterpreter deployment"
+		1) Populate the "Profile Name", "Metasploit Host",
+		   "Metasploit Port", "Metasploit User", "Metasploit Password",
+		   and "Path to OpenDLP files"
+		2) Populate the remainder of the profile's information (Note:
+		   The fields "Username" and "Password" should be left blank)
+		3) Submit the profile
+	H. In your OpenDLP browser, go to "Scans" -> "Start New Scan"
+		1) Populate a unique scan name
+		2) Select the newly-created Metasploit profile from the
+		   "Profile" drop-down
+		3) Click "Get Sessions"
+		4) A table of sessions will display. Select as many checkboxes
+		   as needed to launch the scans.
+		5) Click "Start Scan"
+			a) Be careful to not launch scans more than once per IP
+			   address.
+			b) Scan deployment may take 30 or more seconds as
+			   OpenDLP talks to Metasploit and as Metasploit talks
+			   to the victim Windows systems.
+	J. If you have any problems with this, reference the following URL that
+	   discusses how to use the Metasploit Framework XMLRPC API:
+	   https://community.rapid7.com/docs/DOC-1287
+	K. More Guidance
+		1) Meterpreter deployment: Requires standard deployment files
+		   (opendlpz.exe, client.pem, server.pem) plus strfile.exe and
+		   sc.exe. Caveats:  Concurrent access to meterpreter sessions
+		   will cause deployment failure.   Files cannot be downloaded
+		   to local machine, they must be downloaded to metasploit box.
+		2) Post module deployment: Concurrent access to meterpreter
+		   sessions works fine. Requires post module installed in
+		   metasploit, as well as standard deployment files. It does not
+		   however require strfile.exe or sc.exe.
+
+
+=============================================
+11. Upgrading from version 0.1 to version 0.2
+=============================================
+
+MySQL:
+------
+Run these two commands to create two new columns in the "profiles" table:
+
+mysql> alter table profiles add column creditcards text;
+mysql> alter table profiles add column zipfiles text;
+
+Apache:
+-------
+In your Apache configuration file, put this block BEFORE the "ScriptAlias" for
+the OpenDLP web executable Perl scripts.
+
+Alias /OpenDLP/images/ /var/www/localhost/OpenDLP/web/bin/images/
+<Directory "/var/www/localhost/OpenDLP/web/bin/images/">
+        Options FollowSymLinks
+        AllowOverride None
+        order allow,deny
+        allow from all
+        AuthType Basic
+        AuthName "OpenDLP"
+        AuthUserFile /etc/apache2/.htpasswd.dlp.user
+        Require user dlpuser
+</Directory>
+
+=================================================
+12. Upgrading from version 0.2.3 to version 0.2.4
+=================================================
+
+MySQL:
+------
+Run this command to create a new column in the "profiles" table:
+
+mysql> alter table profiles add column memory float;
+
+=================================================
+13. Upgrading from version 0.2.4 to version 0.2.5
+=================================================
+
+MySQL:
+------
+Run this command to create a new column in the "profiles" table:
+
+mysql> alter table profiles add column mask bool;
+
+=================================================
+14. Upgrading from version 0.2.5 to version 0.2.6
+=================================================
+
+The 0.2.6 release integrates a patch made by @steponequit ("someLuser" at
+hurricanelabs.com and console-cowboys.blogspot.com. This patch allows OpenDLP
+to use the "passing the hash" technique described here:
+
+http://www.foofus.net/~jmk/passhash.html
+
+Two changes must be made to OpenDLP: One to the database and one to the "winexe"
+utility.
+
+MySQL:
+------
+Run this command to create a new column in the "profiles" table:
+
+mysql> alter table profiles add column hash varchar(65);
+
+
+winexe:
+-------
+Integrate the following patch into "winexe" and rebuild it:
+
+http://www.foofus.net/~jmk/passhash.html
+
+===============================================
+15. Upgrading from version 0.2.6 to version 0.3
+===============================================
+
+MySQL:
+------
+Run this command to create new columns in the "profiles" table:
+
+mysql> alter table profiles add column ignore_dbs VARCHAR(10);
+mysql> alter table profiles add column dbs TEXT;
+mysql> alter table profiles add column ignore_tables VARCHAR(10);
+mysql> alter table profiles add column tables TEXT;
+mysql> alter table profiles add column ignore_columns VARCHAR(10);
+mysql> alter table profiles add column columns TEXT;
+mysql> alter table profiles add column rows BIGINT;
+mysql> alter table profiles add column scantype VARCHAR(20);
+
+mysql> alter table systems add column pid smallint unsigned;
+mysql> alter table systems add column dbtotal int;
+mysql> alter table systems add column dbdone int;
+mysql> alter table systems add column tabletotal int;
+mysql> alter table systems add column tabledone int;
+mysql> alter table systems add column columntotal int;
+mysql> alter table systems add column columndone int;
+mysql> alter table systems add column scantype VARCHAR(20);
+
+mysql> alter table results add column db varchar(256);
+mysql> alter table results add column tbl varchar(256);
+mysql> alter table results add column col varchar(256);
+mysql> alter table results add column row bigint unsigned;
+
+
+Regular Expressions:
+--------------------
+You can also create a regular expression for social security numbers that is
+not delimited by any characters, such as the following:
+
+(\D|^)[0-9]{9}(\D|$)
+
+However, be careful to only use this during database scans. If you use this
+with OS filesystem scans, you will have a very high rate of false positives.
+
+
+Perl:
+-----
+Install the following CPAN module: Algorithm::LUHN
+
+Operating system:
+-----------------
+If you want to scan Microsoft SQL server databases, you must install the
+"FreeTDS" driver: http://www.freetds.org
+Note: Additional OS requirements might be necessary. Ubuntu users, you might
+have to do this step first before FreeTDS works:
+> apt-get install tdsodbc
+
+===============================================
+16. Upgrading from version 0.3 to version 0.3.1
+===============================================
+
+MySQL:
+------
+Run this command to alter the "updated" column:
+
+mysql> alter table logs change updated updated varchar(18);
+
+Perl:
+-----
+Install module Time::HiRes
+
+===============================================
+17. Upgrading from version 0.3.2 to version 0.4
+===============================================
+
+MySQL:
+------
+Run this command to create the "agentless" column:
+
+mysql> create table agentless (tracker varchar(32), scan varchar(64), file \ 
+       varchar(8096));
+mysql> create table agentless_zip (tracker varchar(32), scan varchar(64), \
+       unzipdir varchar(64));
+mysql> create table agentless_mount (tracker varchar(32), scan varchar(64), \
+       mountdir varchar(64));
+
+Perl:
+-----
+1. Install module Digest::MD5
+2. Install module File::Path
+3. Install module Archive::Extract
+4. Install module Archive::Zip
+
+Operating System:
+-----------------
+1. For UNIX agentless scans, install "sshfs" package (might require also
+   installing "fuse" package).
+   Ubuntu users: apt-get install sshfs
+2. For UNIX agentless scans, add "opendlp" and the web server user ("www-data"
+   on Ubuntu, "apache" on other distros) to the "fuse" group.
+   A. Ubuntu users: sudo gpasswd -a opendlp fuse
+                    sudo gpasswd -a www-data fuse
+   B. Other distros: Just edit the file "/etc/group"
+
+===============================================
+18. Upgrading from version 0.4.4 to version 0.5
+===============================================
+1. Copy the new web application files in "OpenDLP/web/bin" to
+   "/var/www/localhost/OpenDLP/web/bin"
+2. Copy "OpenDLP/web/etc/version" to
+   "/var/www/localhost/OpenDLP/web/etc/"
+3. Copy the five PL and two EXE files in "OpenDLP/bin" to
+   "/var/www/localhost/OpenDLP/bin". These include the new files:
+   A. StrFile.exe
+   B. metatest.pl
+   C. postmodtest.pl
+4. Copy the three Perl modules in "OpenDLP/perl_modules" to "/usr/local/perl5"
+   (or somewhere else visible to Perl in its path "@INC")
+5. Run these commands inside MySQL to update the tables. Be sure to do these in
+   the order listed:
+   mysql> alter table profiles add column metahost varchar(255);
+   mysql> alter table profiles add column metaport bigint(20) unsigned;
+   mysql> alter table profiles add column metalatency bigint(20) unsigned;
+   mysql> alter table profiles add column metauser varchar(65);
+   mysql> alter table profiles add column metapass varchar(65);
+   mysql> alter table profiles add column metapath varchar(255);
+   mysql> alter table profiles add column metatimeout int(11);
+   mysql> alter table profiles add column metassl tinyint(1);
+   mysql> alter table systems add column sessionid varchar(65);
+6. Install Perl module Data::MessagePack
+7. Copy "OpenDLP/metasploit_modules/opendlp.rb" to your Metasploit system's
+   Metasploit directory "msf3/modules/post/windows/gather" (Backtrack 5 users:
+   This directory is "/opt/metasploit/msf3/modules/post/windows/gather")

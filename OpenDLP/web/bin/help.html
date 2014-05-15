@@ -1,0 +1,177 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+
+print qq {
+<html>
+<head>
+<title>OpenDLP help</title>
+<style>heading {color:#000000;font-family:arial;font-size:14pt;background-color:#FFFFFF;}</style>
+<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>
+<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>
+<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>
+<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>
+</head>
+<body>
+
+<a name=profile><heading>Profile Name</heading></a><br>
+<normal>This is the profile name you give to your policy. When you launch a scan, this will be the name displayed in the drop-down box where you choose what policy to use.</normal><br><br>
+
+<a name=scantype><heading>Scan Type</heading></a><br>
+<normal>OpenDLP currently supports two scan types: An agent-based Windows scanner and an agentless Microsoft SQL Server database scanner.</normal><br><br>
+
+<a name=username><heading>Username</heading></a><br>
+<normal><ul><li><u>For agent- (Windows) or agentless-based (Windows/UNIX) OS scans</u>: This is the local or domain administrator username that the agent will use to deploy to the systems.</li>
+<li><u>For agentless Microsoft SQL Server database scans</u>: This can either be the SQL Server username ("sa" account, for example) or the Windows OS (domain) account.
+<ul><li>If you are using a SQL Server username, leave the "Windows Domain/Workgroup" field blank.</li>
+<li>If you are using a Windows OS (domain) account, enter the Windows Domain/Workgroup in the "Windows Domain/Workgroup" field.</li></li></ul>
+<li><u>For agentless MySQL database scans</u>: This will be the MySQL user you wish to use, such as "root".</li>
+<li><u>For agentless Windows share scans</u>: This can optionally be blank if the share does not require any credentials.</li>
+<li><u>For Metasploit-based scans</u>: This option is ignored and not required.</li>
+</ul></normal>
+<br><br>
+
+<a name=password><heading>Password</heading></a><br>
+<normal>If the password is blank for the administrator's account, do not enter anything here. If you are using an SMBHash, do not enter anything here either.</normal><br><br>
+
+<a name=domain><heading>Windows Domain/Workgroup</heading></a><br>
+<normal>This is required even if the system does not belong to a domain. If it does not belong to a domain, enter the system's workgroup. The domain or workgroup information can be obtained with Samba in UNIX or with nbtstat.exe in Windows (nbtstat -A 1.2.3.4).</normal><br><br>
+
+<a name=smbhash><heading>SMBHash</heading></a><br>
+<normal>Instead of requiring OpenDLP to use normal authentication credentials to access the system, you can use the SMBHash obtained through a pass-the-hash attack. In order to use this, you must have patched your "winexe" utility on OpenDLP's web server. Please see the following link for more information:<br><br>
+<a target="_blank" href="http://www.foofus.net/~jmk/passhash.html">http://www.foofus.net/~jmk/passhash.html</a><br><br>
+This functionality was added to OpenDLP by "someLuser" at <a target="_blank" href="http://blog.hurricanelabs.com/2011/02/opendlp-pass-hash.html">http://blog.hurricanelabs.com/2011/02/opendlp-pass-hash.html</a> and <a target="_blank" href="http://console-cowboys.blogspot.com/2011/02/opendlp-pass-hash.html">http://console-cowboys.blogspot.com/2011/02/opendlp-pass-hash.html</a>. All credit for this integration goes to him.</normal><br><br>
+
+<a name=install_path><heading>Installation Path</heading></a><br>
+<normal>This is the location on the filesystem where OpenDLP will install itself and its files while it runs. Do not use an existing directory, such as "C:\\Windows", as the installation directory because everything in this directory will be recursively deleted when the agent is done scanning.<br><br>Keep in mind that results will be temporarily written to disk before they are uploaded to the OpenDLP web server. If you install the agent outside a protected directory, unprivileged users might be able to see those temporary scan results. Unprivileged users might also be able to replace OpenDLP's EXEs and DLLs, which could lead to privilege escalation attacks on the scanned system. To maintain security and privacy, OpenDLP should be installed to a protected directory.</normal><br><br>
+
+<a name=memory><heading>Memory Limit</heading></a><br>
+<normal>If a system has 1 GB of RAM, only use a percent of that memory for processing files. This is very useful when scanning files larger than the amount of memory installed on the system. Scanning a 10 GB file on a system with 1 GB of memory would be a very bad thing. Instead, if 10% is selected with this option, that 10 GB file will be divided into chunks of 100 MB.</normal><br><br>
+
+<a name=mask><heading>Mask Sensitive Data?</heading></a><br>
+<normal>If this option is enabled, OpenDLP will mask the first 75% of the matched string when it stores that data in its database. This will allow your OpenDLP system to be in compliance with regulations, such as PCI.<br><br>If this option is diabled, OpenDLP will store the matched string verbatim in its database.</normal><br><br>
+
+<a name=directories><heading>Directories</heading></a><br>
+<normal>There are three options from which to choose:
+<ul><li>Scan all directories: This option will scan all directories on the system, including removeable media.</li>
+<li>Scan all directories except these (recursive): This option will recursively scan all directories on the system, including removeable media, except for those directories listed in the text box.</li>
+<li>Only scan the following directories (recursive): This option will only recursively scan the directories listed in the text box.</li>
+<li>Note: For Windows Share scans, these directories should be relative to the share's mount point. For example, do not include "c:\\Windows" as there are no absolute paths when dealing with Windows Shares. If you want to add directories here, put them in a format of "Subdir1" or "Subdir1\\Subdir2".</li>
+<li>Note: For Windows Share scans, all specified directories will be anchored. That is, if you are scanning "\\\\1.2.3.4\\Share" and you want to ignore directories "Foo" and "Bar", OpenDLP will ignore directories "\\\\1.2.3.4\\Share\\Foo" and "\\\\1.2.3.4\\Share\\Bar". However, it will still scan "\\\\1.2.3.4\\Share\\Blah\\Foo".</li></ul></normal><br><br>
+
+<a name=extensions><heading>File Extensions</heading></a><br>
+<normal>There are three options from which to choose:
+<ul><li>Scan all files: This option will scan all files on the system, including removeable media.</li>
+<li>Scan all files except files with the following extensions: This option will scan all files on the system, including removeable media, except for those files with extensions listed in the text box.</li>
+<li>Only scan files with the following file extensions: This option will only scan files that have the extensions listed in the text box.</li></ul></normal><br><br>
+
+<a name=databases><heading>Databases</heading></a><br>
+<normal>There are three options from which to choose:
+<ul><li>Scan all databases: This option will scan all databases on the database server.</li>
+<li>Scan all databases except these: This option will scan all databases on the database server except for those databases listed in the text box.</li>
+<li>Only scan the following databases: This option will only scan databases listed in the text box.</li></ul></normal><br><br>
+
+<a name=tables><heading>Tables</heading></a><br>
+<normal>There are three options from which to choose:
+<ul><li>Scan all tables: This option will scan all tables on the database server.</li>
+<li>Scan all tables except these: This option will scan all tables on the database server except for those tables listed in the text box.</li>
+<li>Only scan the following tables: This option will only scan tables listed in the text box.</li></ul></normal><br><br>
+
+<a name=columns><heading>Columns</heading></a><br>
+<normal>There are three options from which to choose:
+<ul><li>Scan all columns: This option will scan all columns on the database server.</li>
+<li>Scan all columns except these: This option will scan all columns on the database server except for those columns listed in the text box.</li>
+<li>Only scan the following columns: This option will only scan columns listed in the text box.</li></ul></normal><br><br>
+
+<a name=rows><heading>Limit columns to X rows</heading></a><br>
+<normal>This field will limit SELECT queries to the number or rows specified in the text box. Enter "0" for all rows or enter a positive integer to limit the query.</normal><br><br>
+
+<a name=regexes><heading>Regular Expressions</heading></a><br>
+<normal>These checkboxes allow you to enable certain regular expressions (regexes) that the agent will use when searching files. You can add regexes through OpenDLP's <a href="regex.html" target="_blank">regular expression management interface</a>.
+</normal><br><br>
+
+<a name=ccs><heading>Credit Cards</heading></a><br>
+<normal>These options tell the OpenDLP agent what particular regular expressions to treat as credit card numbers. The agent will send any matches through a mod-10 LUHN check to determine if they could be valid credit card numbers. This greatly reduces false positives.
+</normal><br><br>
+
+<a name=zips><heading>Zip Extensions</heading></a><br>
+<normal>These options tell the OpenDLP agent what files to treat as ZIP files. It will unzip those files and process their contents as normal files.</normal><br><br>
+
+<a name=upload_url><heading>Upload URL</heading></a><br>
+<normal>This is the URL to which the agents will upload results and logs. The "results" directory is the only directory to where the agents have access.</normal><br><br>
+
+<a name=upload_user><heading>Upload URL username</heading></a><br>
+<normal>This is the HTTP basicauth username that the agent will use to upload results. This must be the same username that Apache was configured to use for the agents.</normal><br><br>
+
+<a name=upload_pass><heading>Upload URL password</heading></a><br>
+<normal>This is the HTTP basicauth password that the agent will use to upload results. This must be the same password that Apache was configured to use for the agents.</normal><br><br>
+
+<a name=duration><heading>Time between uploads</heading></a><br>
+<normal>This is how often the agent will send results and logs to the web application, in seconds. If a file is being processed, the agent will not interrupt processing to upload results. Therefore, there are situations where the agent will not be timely and will likely be several seconds to several minutes late in sending results.</normal><br><br>
+
+<a name=concurrent><heading>Concurrent deployments</heading></a><br>
+<normal>If you are going to scan 1,000 systems, you can set this option to deploy only X amount of scanners at a time, such as 30, 50, or 100. After agents are successfully deployed and started, the web application will continue to fill the deployment queue up to this limit. This strikes a balance between only distributing one agent at a time (slow) and distributing all of the agents at the same time (which would crush your web application's operating system).<br><br>
+This does not mean only 30, 50, or 100 will run at the same time: It only means how many will be deployed concurrently.</normal><br><br>
+
+<a name=description><heading>Description</heading></a><br>
+<normal>This currently does nothing. However, it will eventually be the description for the Windows service, such as "Call Bob in IT at x1234 if you have any questions about this process."</normal><br><br>
+
+<a name=logs><heading>Log Verbosity</heading></a><br>
+<normal>The OpenDLP agent has three levels of logging verbosity. If you are debugging why an agent may not work or why it does not scan a particular file, choose verbosity 1 or 2. If you are scanning 20+ systems concurrently, do not use a verbosity other than 0. Log verbosities of 1 and 2 can become very large and the OpenDLP web application may have difficulties keeping up when the agents phone home.</normal><br><br>
+
+<a name=metahost><heading>Metasploit Host</heading></a><br>
+<normal>
+This is the location of the Metasploit system that is running xmlrpc. This Metasploit host system will be the actual system carrying out the attack, which will be remote-controlled by the profile you create.
+</normal><br><br>
+
+<a name=metaport><heading>Metasploit Port</heading></a><br>
+<normal>
+This is the port of the Metasploit system that is running xmlrpc. This Metasploit host system will be the actual system carrying out the attack, which will be remote-controlled by the profile you create.
+</normal><br><br>
+
+<a name=metauser><heading>Metasploit Username</heading></a><br>
+<normal>
+When you run xmlrpc on the Metasploit host, you can supply a username and password, or let the xmlrpc choose them for you. If you do not supply a username to the xmlrpc, "msf" is usually the default. 
+</normal><br><br>
+
+<a name=metapass><heading>Metasploit Password</heading></a><br>
+<normal>
+When you run xmlrpc on the Metasploit host, you can supply a username and password or let the xmlrpc choose them for you. If you do not supply a password to the xmlrpc, a random string will be generated by default. Put that string in this field.
+</normal><br><br>
+
+<a name=metapath><heading>Metasploit Path</heading></a><br>
+<normal>
+This is the path to the binary files on the <b>Metasploit</b> system. These are the files that will copied onto a target and executed for the attack. You should have the following files in a directory local to Metasploit: OpenDLPz.exe, client.pem, server.pem, StrFile.exe, and sc.exe.
+</normal><br><br>
+
+<a name=metalatency><heading>Metasploit Latency</heading></a><br>
+<normal>
+Time in milliseconds to wait inside DoEvents loops while polling for data from the Meterpreter console. This is 100ms by default, and you should not need to change it under normal circumstances.
+</normal><br><br>
+
+<a name=metatimeout><heading>Metasploit Timeout</heading></a><br>
+<normal>
+Time in seconds to wait for a response, before giving up. This is not the total timeout for deploying a scan, but rather a timeout for each individual action that is part of a deployment. For instance, uploading a file, changing a directory, or executing a remote command.
+</normal><br><br>
+
+</body>
+</html>
+};

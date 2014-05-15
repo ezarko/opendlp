@@ -1,0 +1,325 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+
+my $version = get_version();
+my $db_admin_file = "../etc/db_admin";
+my $is_valid = 1;
+my %systems = ();
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+my ($db_username, $db_password) = split( ":", $db_line );
+header();
+my $query = CGI->new;
+my $scanname = $query->param('scanname');
+if( $scanname ne "" && $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+{
+	$is_valid = 0;
+	print "Invalid scan name<br><br>\n";
+}
+
+my $system = $query->param('system');
+if( $system ne "" && $system !~ /^[A-Z0-9]{32}$/ )
+{
+	$is_valid = 0;
+	print "Invalid system tracker<br><br>\n";
+}
+
+if( $is_valid )
+{
+	print "<heading>View False Positives</heading><br><br>\n";
+
+	# if no arguments are given
+	if( $system eq "" && $scanname eq "" )
+	{
+		my %scans = ();
+
+		print "On this screen, you can:<br>\n";
+		print "<li>Select a scan to view the false positives associated with its systems</li>\n";
+		print "<li>After selecting a scan, reverse false positives so they display in results<br><br>\n";
+		print "<form method=GET action=false.html>\n";
+		print "<table class=sample>\n";
+		print "<tr><td>Details</td><td>Scan name</td><td>False Positives</td></tr>\n";
+
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT scan,is_false FROM results where is_false = 1";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute();
+		while( my $results = $sth->fetchrow_arrayref() )
+		{
+			$scans{$$results[0]}++;
+		}
+		foreach my $scankey( sort( keys( %scans )))
+		{
+			print "<tr><td><input type=radio name=scanname value=\"$scankey\"></td>\n";
+			print "<td>$scankey</td>\n";
+			print "<td align=right>$scans{$scankey}</td></tr>\n";
+		}
+		print "<tr><td colspan=10><input type=submit value=\"View False Positives\"</td></tr>\n";
+		print "</table></form>\n";
+	}
+
+	# if scanname is given as an argument, but not system
+	elsif( $scanname ne "" && $system eq "" )
+	{
+		print "Select a system in scan \"$scanname\" to view its detailed false positives:<br><br>\n";
+		print "<form method=GET action=false.html>\n";
+		print "<input type=hidden name=scanname value=\"$scanname\">\n";
+		print "<table class=sample>\n";
+		print "<tr><td><br></td><td>Network name</td><td>IP address</td><td>False Positives</td></tr>\n";
+
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT results.tracker,results.system,systems.ip FROM results,systems WHERE results.is_false = 1 AND results.scan=? AND results.tracker = systems.tracker";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $scanname );
+		while( my $results = $sth->fetchrow_arrayref() )
+		{
+			$system{$$results[0]}{system} = $$results[1];
+			$system{$$results[0]}{ip} = $$results[2];
+			$system{$$results[0]}{false}++;
+		}
+
+		foreach my $tracking( sort( keys( %system )))
+		{
+			print "\n<tr><td><input type=radio name=system value=$tracking></td>\n";
+			my $printme_system = $system{$tracking}{system};
+			$printme_system = replacechars( $printme_system );
+			my $printme_ip = $system{$tracking}{ip};
+			$printme_ip = replacechars( $printme_ip );
+			print "<td>$printme_system</td>\n";
+			print "<td>$printme_ip</td>\n";
+			print "<td align=right>$system{$tracking}{false}</td>\n";
+			print "</tr>\n";
+		}
+		print "<tr><td colspan=4 align=left><input type=submit value=\"View False Positives\"></td></tr></table>\n";
+	}
+
+	# look at details of specific system
+	elsif( $scanname ne "" && $system ne "" )
+	{
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT system,ip,scantype from systems where scan=? AND tracker=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $scanname, $system );
+		my $results = $sth->fetchrow_arrayref();
+		my $hostname = $$results[0];
+		my $ip = $$results[1];
+		my $scantype = $$results[2];
+
+		if( $scantype eq "win_agent" || $scantype eq "win_agentless" || $scantype eq "unix_agentless" || $scantype eq "win_share" )
+		{
+			print "Select a false positive to clear for system $ip";
+			if( $hostname ne "" )
+			{
+				print " ($hostname)";
+			}
+			print " in scan \"$scanname\":<br><br>\n";
+
+			my $string = "SELECT type,pattern,file,offset,md5,number FROM results WHERE scan=? AND tracker=? AND is_false = \"1\"";
+			my $sth = $dbh->prepare( $string );
+			$sth->execute( $scanname, $system );
+			my $row_counter = 1;
+
+			print "<form method=post action=false-verify.html>\n";
+			print "<input type=hidden name=scanname value=\"$scanname\">\n";
+			print "<input type=hidden name=tracker value=\"$system\">\n";
+			print "<table class=sample><tr>\n";
+			print "<td>#</td>\n";
+			print "<td>Regex</td>\n";
+			print "<td>Pattern</td>\n";
+			print "<td>File</td>\n";
+			print "<td>Byte offset</td>\n";
+			print "<td>False?</td></tr>\n";
+
+			while( my $results = $sth->fetchrow_arrayref() )
+			{
+				my $type = $$results[0];
+				my $pattern = $$results[1];
+				my $file = $$results[2];
+				my $offset = $$results[3];
+				my $md5 = $$results[4];
+				my $number = $$results[5];
+
+				print "<tr><td>$row_counter</td>\n";
+				$row_counter++;
+				print "<td>$type</td>\n";
+				my $pattern_copy = replacechars( $pattern );
+				print "<td>$pattern_copy</td>\n";
+				my $file_printme = $file;
+				$file_printme =~ s/\\\\/\\/g;
+				$file_printme = replacechars( $file_printme );
+				print "<td>$file_printme</td>\n";
+				print "<td>$offset</td>\n";
+
+				print "<td><input type=checkbox name=f$number value=1></td></tr>\n\n";
+			}
+			print "<tr><td colspan=6 align=right><input type=submit value=\"Mark Selected as NOT False Positives\"></td></tr>\n";
+			print "</table></form>\n";
+		}
+		elsif( $scantype =~ /^(mssql_agentless|mysql_agentless)$/ )
+		{
+			print "Select a false positive to clear for database server $ip";
+			if( $hostname ne "" )
+			{
+				print " ($hostname)";
+			}
+			print " in scan \"$scanname\":<br><br>\n";
+
+			my $string = "SELECT type,pattern,db,tbl,col,row,number FROM results WHERE scan=? AND tracker=? AND is_false = \"1\"";
+			my $sth = $dbh->prepare( $string );
+			$sth->execute( $scanname, $system );
+			my $row_counter = 1;
+
+			print "<form method=post action=false-verify.html>\n";
+			print "<input type=hidden name=scanname value=\"$scanname\">\n";
+			print "<input type=hidden name=tracker value=\"$system\">\n";
+			print "<table class=sample><tr>\n";
+			print "<td>#</td>\n";
+			print "<td>Regex</td>\n";
+			print "<td>Pattern</td>\n";
+			print "<td>Database</td>\n";
+			print "<td>Table</td>\n";
+			print "<td>Column</td>\n";
+			print "<td>Row</td>\n";
+			print "<td>False?</td></tr>\n";
+
+			while( my $results = $sth->fetchrow_arrayref() )
+			{
+				my $type = $$results[0];
+				my $pattern = $$results[1];
+				my $db = $$results[2];
+				my $tbl = $$results[3];
+				my $col = $$results[4];
+				my $row = $$results[5];
+				my $number = $$results[6];
+
+				print "<tr><td>$row_counter</td>\n";
+				$row_counter++;
+				print "<td>$type</td>\n";
+				my $pattern_copy = replacechars( $pattern );
+				print "<td>$pattern_copy</td>\n";
+				my $db_printme = replacechars( $db );
+				print "<td>$db_printme</td>\n";
+				my $tbl_printme = replacechars( $tbl );
+				print "<td>$tbl_printme</td>\n";
+				my $col_printme = replacechars( $col );
+				print "<td>$col_printme</td>\n";
+				print "<td>$row</td>\n";
+
+				print "<td><input type=checkbox name=f$number value=1></td></tr>\n\n";
+			}
+			print "<tr><td colspan=8 align=right><input type=submit value=\"Mark Selected as NOT False Positives\"></td></tr>\n";
+			print "</table></form>\n";
+
+		}
+	}
+}
+
+
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0>\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub replacechars
+{
+	my $string = shift;
+
+	$string =~ s/\&/\&amp;/g;
+	$string =~ s/\#/&#35;/g;
+	$string =~ s/"/&#34;/g;
+	$string =~ s/\%/&#37;/g;
+	$string =~ s/\'/&#39;/g;
+	$string =~ s/\//&#47;/g;
+	$string =~ s/</&#60;/g;
+	$string =~ s/>/&#62;/g;
+	$string =~ s/\[/&#91;/g;
+	$string =~ s/\\/&#92;/g;
+	$string =~ s/\]/&#93;/g;
+	$string =~ s/`/&#96;/g;
+	$string =~ s/{/&#123;/g;
+	$string =~ s/\|/&#124;/g;
+	$string =~ s/}/&#125;/g;
+	$string =~ s/\(/&#40;/g;
+	$string =~ s/\)/&#41;/g;
+	$string =~ s/\n/<br>/g;
+	$string =~ s/\ /&nbsp;/g;
+
+	return $string;
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

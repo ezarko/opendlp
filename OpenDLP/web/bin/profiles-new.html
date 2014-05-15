@@ -1,0 +1,1553 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+
+my $version = get_version();
+
+my $MAX_LENGTH_PROFILE = 64;
+my $MAX_LENGTH_USERNAME = 128;
+my $MAX_LENGTH_SMBHASH = 65;
+my $MAX_LENGTH_PASSWORD = 255;
+my $MAX_LENGTH_PATH = 255;
+my $MAX_LENGTH_DOMAIN = 255;
+my $MAX_LENGTH_EXTS = 65535;
+my $MAX_LENGTH_DIRS = 65535;
+my $MAX_LENGTH_REGEXES = 65535;
+my $MAX_LENGTH_DATABASES = 65535;
+my $MAX_LENGTH_TABLES = 65535;
+my $MAX_LENGTH_COLUMNS = 65535;
+my $MAX_ROWS = 9223372036854775807;
+my $MAX_LENGTH_URL = 255;
+my $MAX_LENGTH_URL_USER = 32;
+my $MAX_LENGTH_URL_PASS = 32;
+my $MAX_DELAYTIME = 65535;
+my $MAX_LENGTH_DESCRIPTION = 255;
+my $MAX_CONCURRENT = 100;
+my $db_admin_file = "../etc/db_admin";
+
+my $is_valid = 1;
+my( $profile, $username, $password, $domain, $dir_choice, $directories ) = "";
+my $smbhash = "";
+my( $ext_choice, $extensions, $path, $zipfiles, $creditcards ) = "";
+my( $db_username, $db_password, $memory, $mask ) = "";
+my( $url, $urluser, $urlpass, $delaytime, $description, $debug, $concurrent ) = "";
+my( $db_choice, $dbs, $table_choice, $tables, $column_choice, $columns, $rows, $scantype ) = "";
+my( $is_new ) = "";
+my @regexes = ();
+my( $metahost, $metaport, $metauser, $metapass, $metapath) = "";
+my $metalatency = 100;
+my $metatimeout = 30;
+my $metassl = 0;
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if( request_method() ne "POST" )
+{
+	$is_valid = 0;
+	print "Only POST requests are allowed. Try starting <a href=profiles.html>here</a>.<br>\n";
+}
+
+foreach $p (param())
+{
+	$form{$p} = param($p);
+
+	if( $p eq "profilename" )
+	{
+		$profile = $form{$p};
+		$profile =~ s/^\ +//g;
+		$profile =~ s/\ +$//g;
+		if( length( $profile ) > $MAX_LENGTH_PROFILE )
+		{
+			$is_valid = 0;
+			print "Profile is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+		}
+		if( $profile !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+		{
+			$is_valid = 0;
+			print "Profile cannot be blank and can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+		}
+	}
+
+	if( $p eq "scantype" )
+	{
+		$scantype = $form{$p};
+		if( $scantype !~ /^(win_agent|meta_agent|post_agent|mssql_agentless|mysql_agentless|win_agentless|unix_agentless|win_share)$/ )
+		{
+			$is_valid = 0;
+			print "Scan type can only be Windows Filesystem (agent), Metasploit (agent), Windows Filesystem (agentless), UNIX Filesystem (agentless), Microsoft SQL Server, or MySQL<br><br>\n";
+		}
+	}
+
+	if( $p eq "username" )
+	{
+		$username = $form{$p};
+		$username =~ s/^\ +//g;
+		$username =~ s/\ +$//g;
+		if( length( $username ) > $MAX_LENGTH_USERNAME )
+		{
+			$is_valid = 0;
+			print "Username is too long. Limit it to $MAX_LENGTH_USERNAME characters.<br><br>\n";
+		}
+	}
+
+	if( $p eq "smbhash" && length($form{$p}) != 0 ) {$smbhash = $form{$p};}
+
+	if( $p eq "password" )
+	{
+		$password = $form{$p};
+		if( length( $password ) > $MAX_LENGTH_PASSWORD )
+		{
+			$is_valid = 0;
+			print "Password is too long. Limit it to $MAX_LENGTH_PASSWORD characters.<br><br>\n";
+		}
+	}
+
+	if( $p eq "mask" )
+	{
+		$mask = $form{$p};
+		if( $mask !~ /^(0|1)$/ )
+		{
+			$is_valid = 0;
+			print "Value for masking sensitive data can only be a zero or one.<br><br>\n";
+		}
+	}
+
+	if( $p eq "metassl" )
+	{
+		$metassl = $form{$p};
+		if( $metassl !~ /^(0|1)$/ )
+		{
+			$is_valid = 0;
+			print "Value for using SSL to communicate with Metasploit can only be a zero or one. Received was: $metassl<br><br>\n";
+		}
+	}
+	if( $p eq "is_new" )
+	{
+		$is_new = $form{$p};
+		if( $is_new !~ /^(0|1)$/ )
+		{
+			$is_valid = 0;
+			print "\"is_new\" must be a 0 or 1.<br><br>\n";
+		}
+	}
+
+	if( $p eq "domain" ) {$domain = $form{$p};}
+
+	if( $p eq "path" )
+	{
+		$path = $form{$p};
+		$path =~ s/^\ +//g;
+		$path =~ s/\ +$//g;
+	}
+
+	if( $p eq "memory" )      { $memory      = $form{$p}; }
+	if( $p eq "dir_choice" )  { $dir_choice  = $form{$p}; }
+	if( $p eq "directories" ) { $directories = $form{$p}; }
+	if( $p eq "metahost" )    { $metahost    = $form{$p}; }
+	if( $p eq "metassl" )     { $metassl     = $form{$p}; }
+	if( $p eq "metaport" )    { $metaport    = $form{$p}; }
+	if( $p eq "metauser" )    { $metauser    = $form{$p}; }
+	if( $p eq "metapass" )    { $metapass    = $form{$p}; }
+  if( $p eq "metapath" )    { $metapath    = $form{$p}; }
+  if( $p eq "metalatency" ) { $metalatency = $form{$p}; }
+  if( $p eq "metatimeout" ) { $metatimeout = $form{$p}; }
+
+	if( $p eq "creditcards" )
+	{
+		$creditcards = $form{$p};
+		if( length( $creditcards ) > $MAX_LENGTH_DIRS )
+		{
+			$is_valid = 0;
+			print "Total length of all credit cards must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($creditcards) . " characters.<br><br>\n";
+		}
+	}
+
+	if( $p eq "zipfile" ) {$zipfiles = $form{$p};}
+	if( $p eq "ext_choice" ) {$ext_choice = $form{$p};}
+	if( $p eq "extensions" ) { $extensions = $form{$p};}
+
+	if( $p =~ /^regex_[0-9]+$/ )
+	{
+		my $temp_regex = $p;
+		if( $form{$temp_regex} == 1 )
+		{
+			$temp_regex =~ s/^.*_//g;
+			push @regexes, $temp_regex;
+		}
+		else
+		{
+			print "Invalid option for $temp_regex<br><br>\n";
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "url" ) {$url = $form{$p};}
+	if( $p eq "urluser" ) {$urluser = $form{$p};}
+	if( $p eq "urlpass" ) {$urlpass = $form{$p};}
+	if( $p eq "wait" ) {$delaytime = $form{$p};}
+
+	if( $p eq "description" )
+	{
+		$description = $form{$p};
+		if( $description > $MAX_LENGTH_DESCRIPTION )
+		{
+			$is_valid = 0;
+			print "Length of description cannot exceed $MAX_LENGTH_DESCRIPTION.<br><br>\n";
+		}
+	}
+	if( $p eq "debug" )
+	{
+		$debug = $form{$p};
+		if( $debug < 0 || $debug > 3 )
+		{
+			$is_valid = 0;
+			print "Log verbosity must either be 0, 1, 2, or 3.<br><br>\n";
+		}
+	}
+	if( $p eq "concurrent" )
+	{
+		$concurrent = $form{$p};
+		if( $concurrent < 1 || $concurrent > $MAX_CONCURRENT )
+		{
+			$is_valid = 0;
+			print "Concurrent must be between 1 and $MAX_CONCURRENT.<br><br>\n";
+		}
+	}
+
+	if( $p eq "db_choice" ) { $db_choice = $form{$p}; }
+	if( $p eq "databases" ) { $dbs = $form{$p}; }
+	if( $p eq "table_choice" ) { $table_choice = $form{$p}; }
+	if( $p eq "tables" ) { $tables = $form{$p}; }
+	if( $p eq "column_choice" ) { $column_choice = $form{$p}; }
+	if( $p eq "columns" ) { $columns = $form{$p}; }
+	if( $p eq "rows" ) { $rows = $form{$p}; }
+}
+
+if ($scantype eq "meta_agent" || $scantype eq "post_agent") {  
+  if ($metauser eq "") { $is_valid = 0; print "Metasploit Username cannot be blank.<br><br>\n";  }
+  if ($metapass eq "") { $is_valid = 0; print "Metasploit Password cannot be blank.<br><br>\n";  }
+  if ($metaport eq "") { $is_valid = 0; print "You must supply a port on which metasploit is listening.<br><br>\n";  }
+  if ($metahost eq "") { $is_valid = 0; print "You must supply the host on which metasploit is listening. <br><br>\n";  }
+  if ($metapath eq "") { $is_valid = 0; print "You must supply the path on the metasploit system to the OpenDLP files, which will be injected into the target system.<br><br>\n";  }  
+  if ($path     eq "") { $is_valid = 0; print "Path cannot be blank.<br><br>\n";  }
+
+  if( $memory != 0.01 && $memory != 0.02 && $memory != 0.05 && $memory != 0.1 && $memory != 0.15 && $memory != 0.2 && $memory != 0.25 )  {
+    $is_valid = 0;
+    print "Memory is an invalid number. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+  }
+
+  if (length( $path ) > $MAX_LENGTH_PATH )          { $is_valid = 0; print "Path is too long. Limit it to $MAX_LENGTH_PATH characters.<br><br>\n";  }
+  if ($dir_choice !~ /^(everything|ignore|allow)$/ ) { $is_valid = 0; print "Select a radio option for the directories.<br><br>\n";  }
+  if (length( $directories ) > $MAX_LENGTH_DIRS )   { $is_valid = 0; print "Total length of all directories must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($directories) . " characters.<br><br>\n";  }
+  if (length( $zipfiles ) > $MAX_LENGTH_DIRS )      { $is_valid = 0; print "Total length of all zip extensions must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($zipfiles) . " characters.<br><br>\n";  }  
+  if ($ext_choice !~ /^(everything|ignore|allow)$/ ) { $is_valid = 0; print "Select a radio option for the file extensions.<br><br>\n";  }
+  if (length( $extensions ) > $MAX_LENGTH_EXTS )    { $is_valid = 0; print "Total length of all file extensions must be less than " . $MAX_LENGTH_EXTS + 1 . " characters. Yours was a length of " . length($extensions) . " characters.<br><br>\n";}
+
+  my @temp_exts = split( "\r\n", $extensions );
+  my $line_exts = 1;
+  foreach my $temp_ext( @temp_exts )
+  {
+    chomp $temp_ext;
+    if( $temp_ext eq "" || $temp_ext =~ /^\ +$/ )
+    {
+      print "Blank or empty file extension on line $line_exts<br><br>\n";
+      $is_valid = 0;
+    }
+    $line_exts++;
+  }
+
+  if (length($url) > $MAX_LENGTH_URL)          { $is_valid = 0; print "Length of phone home URL must be less than " . $MAX_LENGTH_URL + 1 . " characters. Yours was a length of " . length($url) . " characters.<br><br>\n";  }
+  if ($url !~ /^http(s|):\/\//)                 { $is_valid = 0; print "Phone home URL must start with \"http://\" or \"https://\".<br><br>\n";  }
+  if (length($urluser) > $MAX_LENGTH_URL_USER) { $is_valid = 0; print "Length of phone home URL\'s username must be less than " . $MAX_LENGTH_URL_USER + 1 . " characters.<br><br>\n";  }
+  if ($urluser eq "")                           { $is_valid = 0; print "Phone home URL\'s username cannot be blank.<br><br>\n";  }
+  if (length($urlpass) > $MAX_LENGTH_URL_PASS) { $is_valid = 0; print "Length of phone home URL\'s password must be less than " . $MAX_LENGTH_URL_PASS + 1 . " characters.<br><br>\n";  }
+  if ($urlpass eq "")                           { $is_valid = 0; print "Phone home URL\'s password cannot be blank.<br><br>\n";  }
+  if ($delaytime > $MAX_DELAYTIME)              { $is_valid = 0; print "Maximum delay time is $MAX_DELAYTIME.<br><br>\n";  }
+  if ($delaytime !~ /^[0-9]+$/)                 { $is_valid = 0; print "Delay time must be a digit.<br><br>\n";  }
+  
+  
+}
+elsif( $scantype eq "win_agent" )
+{
+	if( $username eq "" )
+	{
+		$is_valid = 0;
+		print "Username cannot be blank.<br><br>\n";
+	}
+	if( length( $smbhash ) > $MAX_LENGTH_SMBHASH )
+	{
+		$is_valid = 0;
+		$smbhash = "";
+		print "SMBHash is too long. Limit it to $MAX_LENGTH_SMBHASH characters.<br><br>\n";
+	}
+	elsif($smbhash !~ m/[\w]{32}:[\w]{32}/ && $smbhash ne "" )
+	{
+		$is_valid = 0;
+		$smbhash = "";
+		print "SMBHash is invalid.<br><br>\n";
+	}
+
+	if( $domain eq "" )
+	{
+		$is_valid = 0;
+		print "Domain/Workgroup cannot be blank.<br><br>\n";
+	}
+
+	if( length( $domain ) > $MAX_LENGTH_DOMAIN )
+	{
+		$is_valid = 0;
+		print "Domain is too long. Limit it to $MAX_LENGTH_DOMAIN characters.<br><br>\n";
+	}
+
+	if( $path eq "" )
+	{
+		$is_valid = 0;
+		print "Path cannot be blank.<br><br>\n";
+	}
+
+	if( $memory != 0.01 && $memory != 0.02 && $memory != 0.05 && $memory != 0.1 && $memory != 0.15 && $memory != 0.2 && $memory != 0.25 )
+	{
+		$is_valid = 0;
+		print "Memory is an invalid number. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+	}
+
+	if( length( $path ) > $MAX_LENGTH_PATH )
+	{
+		$is_valid = 0;
+		print "Path is too long. Limit it to $MAX_LENGTH_PATH characters.<br><br>\n";
+	}
+
+	if( $dir_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the directories.<br><br>\n";
+	}
+
+	if( length( $directories ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all directories must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($directories) . " characters.<br><br>\n";
+	}
+
+	if( length( $zipfiles ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all zip extensions must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($zipfiles) . " characters.<br><br>\n";
+	}
+
+	if( $ext_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the file extensions.<br><br>\n";
+	}
+
+	if( length( $extensions ) > $MAX_LENGTH_EXTS )
+	{
+		$is_valid = 0;
+		print "Total length of all file extensions must be less than " . $MAX_LENGTH_EXTS + 1 . " characters. Yours was a length of " . length($extensions) . " characters.<br><br>\n";
+	}
+
+	my @temp_exts = split( "\r\n", $extensions );
+	my $line_exts = 1;
+	foreach my $temp_ext( @temp_exts )
+	{
+		chomp $temp_ext;
+		if( $temp_ext eq "" || $temp_ext =~ /^\ +$/ )
+		{
+			print "Blank or empty file extension on line $line_exts<br><br>\n";
+			$is_valid = 0;
+		}
+		$line_exts++;
+	}
+
+	if( length( $url ) > $MAX_LENGTH_URL )
+	{
+		$is_valid = 0;
+		print "Length of phone home URL must be less than " . $MAX_LENGTH_URL + 1 . " characters. Yours was a length of " . length($url) . " characters.<br><br>\n";
+	}
+	if( $url !~ /^http(s|):\/\// )
+	{
+		$is_valid = 0;
+		print "Phone home URL must start with \"http://\" or \"https://\".<br><br>\n";
+	}
+
+	if( length( $urluser ) > $MAX_LENGTH_URL_USER )
+	{
+		$is_valid = 0;
+		print "Length of phone home URL\'s username must be less than " . $MAX_LENGTH_URL_USER + 1 . " characters.<br><br>\n";
+	}
+	if( $urluser eq "" )
+	{
+		$is_valid = 0;
+		print "Phone home URL\'s username cannot be blank.<br><br>\n";
+	}
+
+	if( length( $urlpass ) > $MAX_LENGTH_URL_PASS )
+	{
+		$is_valid = 0;
+		print "Length of phone home URL\'s password must be less than " . $MAX_LENGTH_URL_PASS + 1 . " characters.<br><br>\n";
+	}
+	if( $urlpass eq "" )
+	{
+		$is_valid = 0;
+		print "Phone home URL\'s password cannot be blank.<br><br>\n";
+	}
+	if( $delaytime > $MAX_DELAYTIME )
+	{
+		$is_valid = 0;
+		print "Maximum delay time is $MAX_DELAYTIME.<br><br>\n";
+	}
+	if( $delaytime !~ /^[0-9]+$/ )
+	{
+		$is_valid = 0;
+		print "Delay time must be a digit.<br><br>\n";
+	}
+}
+elsif( $scantype eq "win_agentless" )
+{
+	if( $username eq "" )
+	{
+		$is_valid = 0;
+		print "Username cannot be blank.<br><br>\n";
+	}
+	if( length( $smbhash ) > $MAX_LENGTH_SMBHASH )
+	{
+		$is_valid = 0;
+		$smbhash = "";
+		print "SMBHash is too long. Limit it to $MAX_LENGTH_SMBHASH characters.<br><br>\n";
+	}
+	elsif($smbhash !~ m/[\w]{32}:[\w]{32}/ && $smbhash ne "" )
+	{
+		$is_valid = 0;
+		$smbhash = "";
+		print "SMBHash is invalid.<br><br>\n";
+	}
+
+	if( $domain eq "" )
+	{
+		$is_valid = 0;
+		print "Domain/Workgroup cannot be blank.<br><br>\n";
+	}
+
+	if( length( $domain ) > $MAX_LENGTH_DOMAIN )
+	{
+		$is_valid = 0;
+		print "Domain is too long. Limit it to $MAX_LENGTH_DOMAIN characters.<br><br>\n";
+	}
+
+	if( $memory != 0.01 && $memory != 0.02 && $memory != 0.05 && $memory != 0.1 && $memory != 0.15 && $memory != 0.2 && $memory != 0.25 )
+	{
+		$is_valid = 0;
+		print "Memory is an invalid number. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+	}
+
+	if( $dir_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the directories.<br><br>\n";
+	}
+
+	if( length( $directories ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all directories must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($directories) . " characters.<br><br>\n";
+	}
+
+	if( length( $zipfiles ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all zip extensions must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($zipfiles) . " characters.<br><br>\n";
+	}
+
+	if( $ext_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the file extensions.<br><br>\n";
+	}
+
+	if( length( $extensions ) > $MAX_LENGTH_EXTS )
+	{
+		$is_valid = 0;
+		print "Total length of all file extensions must be less than " . $MAX_LENGTH_EXTS + 1 . " characters. Yours was a length of " . length($extensions) . " characters.<br><br>\n";
+	}
+
+	my @temp_exts = split( "\r\n", $extensions );
+	my $line_exts = 1;
+	foreach my $temp_ext( @temp_exts )
+	{
+		chomp $temp_ext;
+		if( $temp_ext eq "" || $temp_ext =~ /^\ +$/ )
+		{
+			print "Blank or empty file extension on line $line_exts<br><br>\n";
+			$is_valid = 0;
+		}
+		$line_exts++;
+	}
+}
+elsif( $scantype eq "win_share" )
+{
+	if( length( $smbhash ) > $MAX_LENGTH_SMBHASH )
+	{
+		$is_valid = 0;
+		$smbhash = "";
+		print "SMBHash is too long. Limit it to $MAX_LENGTH_SMBHASH characters.<br><br>\n";
+	}
+	elsif($smbhash !~ m/[\w]{32}:[\w]{32}/ && $smbhash ne "" )
+	{
+		$is_valid = 0;
+		$smbhash = "";
+		print "SMBHash is invalid.<br><br>\n";
+	}
+
+	if( length( $domain ) > $MAX_LENGTH_DOMAIN )
+	{
+		$is_valid = 0;
+		print "Domain is too long. Limit it to $MAX_LENGTH_DOMAIN characters.<br><br>\n";
+	}
+
+	if( $memory != 0.01 && $memory != 0.02 && $memory != 0.05 && $memory != 0.1 && $memory != 0.15 && $memory != 0.2 && $memory != 0.25 )
+	{
+		$is_valid = 0;
+		print "Memory is an invalid number. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+	}
+
+	if( $dir_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the directories.<br><br>\n";
+	}
+
+	if( length( $directories ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all directories must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($directories) . " characters.<br><br>\n";
+	}
+
+	if( length( $zipfiles ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all zip extensions must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($zipfiles) . " characters.<br><br>\n";
+	}
+
+	if( $ext_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the file extensions.<br><br>\n";
+	}
+
+	if( length( $extensions ) > $MAX_LENGTH_EXTS )
+	{
+		$is_valid = 0;
+		print "Total length of all file extensions must be less than " . $MAX_LENGTH_EXTS + 1 . " characters. Yours was a length of " . length($extensions) . " characters.<br><br>\n";
+	}
+
+	my @temp_exts = split( "\r\n", $extensions );
+	my $line_exts = 1;
+	foreach my $temp_ext( @temp_exts )
+	{
+		chomp $temp_ext;
+		if( $temp_ext eq "" || $temp_ext =~ /^\ +$/ )
+		{
+			print "Blank or empty file extension on line $line_exts<br><br>\n";
+			$is_valid = 0;
+		}
+		$line_exts++;
+	}
+}
+elsif( $scantype eq "unix_agentless" )
+{
+	if( $username eq "" )
+	{
+		$is_valid = 0;
+		print "Username cannot be blank.<br><br>\n";
+	}
+	if( $memory != 0.01 && $memory != 0.02 && $memory != 0.05 && $memory != 0.1 && $memory != 0.15 && $memory != 0.2 && $memory != 0.25 )
+	{
+		$is_valid = 0;
+		print "Memory is an invalid number. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+	}
+
+	if( $dir_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the directories.<br><br>\n";
+	}
+
+	if( length( $directories ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all directories must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($directories) . " characters.<br><br>\n";
+	}
+
+	if( length( $zipfiles ) > $MAX_LENGTH_DIRS )
+	{
+		$is_valid = 0;
+		print "Total length of all zip extensions must be less than " . $MAX_LENGTH_DIRS + 1 . " characters. Yours was a length of " . length($zipfiles) . " characters.<br><br>\n";
+	}
+
+	if( $ext_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the file extensions.<br><br>\n";
+	}
+
+	if( length( $extensions ) > $MAX_LENGTH_EXTS )
+	{
+		$is_valid = 0;
+		print "Total length of all file extensions must be less than " . $MAX_LENGTH_EXTS + 1 . " characters. Yours was a length of " . length($extensions) . " characters.<br><br>\n";
+	}
+
+	my @temp_exts = split( "\r\n", $extensions );
+	my $line_exts = 1;
+	foreach my $temp_ext( @temp_exts )
+	{
+		chomp $temp_ext;
+		if( $temp_ext eq "" || $temp_ext =~ /^\ +$/ )
+		{
+			print "Blank or empty file extension on line $line_exts<br><br>\n";
+			$is_valid = 0;
+		}
+		$line_exts++;
+	}
+}
+elsif( $scantype =~ /^(mssql_agentless|mysql_agentless)$/ )
+{
+	if( $username eq "" )
+	{
+		$is_valid = 0;
+		print "Username cannot be blank.<br><br>\n";
+	}
+	if( $db_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the databases.<br><br>\n";
+	}
+
+	if( $table_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the tables.<br><br>\n";
+	}
+
+	if( $column_choice !~ /^(everything|ignore|allow)$/ )
+	{
+		$is_valid = 0;
+		print "Select a radio option for the columns.<br><br>\n";
+	}
+
+	if( length( $dbs ) > $MAX_LENGTH_DATABASES )
+	{
+		$is_valid = 0;
+		print "Total length of all databases must be less than " . $MAX_LENGTH_DATABASES + 1 . " characters. Yours was a length of " . length($dbs) . " characters.<br><br>\n";
+	}
+
+	if( length( $tables ) > $MAX_LENGTH_TABLES )
+	{
+		$is_valid = 0;
+		print "Total length of all tables must be less than " . $MAX_LENGTH_TABLES + 1 . " characters. Yours was a length of " . length($tables) . " characters.<br><br>\n";
+	}
+
+	if( length( $columns ) > $MAX_LENGTH_COLUMNS )
+	{
+		$is_valid = 0;
+		print "Total length of all columns must be less than " . $MAX_LENGTH_COLUMNS + 1 . " characters. Yours was a length of " . length($columns) . " characters.<br><br>\n";
+	}
+
+	if( $rows < 0 || $rows > $MAX_ROWS )
+	{
+		$is_valid = 0;
+		print "Rows is an invalid number. It must be a non-negative integer less than 9223372036854775808.<br><br>\n";
+	}
+}
+if( $scantype eq "mssql_agentless" )
+{
+	if( $domain ne "" )
+	{
+		$username = $domain . "\\" . $username;
+	}
+}
+
+my $length_regexes = @regexes;
+if( $length_regexes < 1 )
+{
+	print "No regular expressions selected.<br><br>\n";
+	$is_valid = 0;
+}
+
+if( $is_valid )
+{
+	if( $mask eq "" )
+	{
+		$mask = 0;
+	}
+	if ($metassl eq "") { $metassl = 1; }
+
+	if( $is_new == 1 )
+	{
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+		my $string = "SELECT profile from profiles where profile=?;";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $profile );
+		my $results = $sth->fetchrow_arrayref();
+		if( $$results[0] eq "" )
+		{
+			my $regex_db = "";
+			my $length_regex = @regexes;
+			my $x_regex = 0;
+			while( $x_regex < $length_regex )
+			{
+				$regex_db .= "$regexes[$x_regex]";
+				if( $x_regex < ($length_regex - 1))
+				{
+					$regex_db .= ",";
+				}
+				$x_regex++;
+			}
+			
+			if ($scantype eq "meta_agent" || $scantype eq "post_agent") {
+        
+        #Use this code once the database is updated!
+        $string = "INSERT INTO profiles SET profile=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,path=?," .
+                  "phonehomeurl=?,phonehomeuser=?,phonehomepass=?,delaytime=?,description=?,debug=?,concurrent=?," .
+                  "creditcards=?,zipfiles=?,memory=?,mask=?,scantype=?,metahost=?,metaport=?,metauser=?,".
+                  "metapass=?,metapath=?,metalatency=?,metatimeout=?,metassl=?;";
+        $sth = $dbh->prepare($string);
+        $sth->execute($profile, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $path, 
+                      $url, $urluser, $urlpass, $delaytime, $description, $debug, $concurrent, 
+                      $creditcards, $zipfiles, $memory, $mask, $scantype, $metahost, $metaport, $metauser, 
+                      $metapass, $metapath, $metalatency, $metatimeout, $metassl );
+
+				print "<heading>New Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+			
+				my $metahost_copy    = filter($metahost);
+				my $metaport_copy    = filter($metaport);
+				my $metauser_copy    = filter($metauser);
+				my $metapass_copy    = filter($metapass);
+        my $metapath_copy    = filter($metapath);
+        my $metalatency_copy = filter($metalatency);
+        my $metatimeout_copy = filter($metatimeout);        
+
+				print "<tr><td>Metasploit Host</td><td>$metahost_copy</td></tr>\n";
+				print "<tr><td>Metasploit Port</td><td>$metaport_copy</td></tr>\n";
+				print "<tr><td>Using SSL</td><td>";
+				if ($metassl == 1) { print "Yes";}
+				elsif ($metassl == 0) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Metasploit User</td><td>$metauser_copy</td></tr>\n";
+				print "<tr><td>Metasploit Password</td><td>$metapass_copy</td></tr>\n";
+				print "<tr><td>Path to OpenDLP files on Metasploit system</td><td>$metapath_copy</td></tr>\n";
+        print "<tr><td>Latency (used to throttle CPU usage when deploying)</td><td>$metalatency_copy</td></tr>\n";
+        print "<tr><td>Metasploit Timeout (Time to wait for response before giving up)</td><td>$metatimeout_copy</td></tr>\n";
+        
+				my $path_copy = filter( $path );
+				print "<tr><td>Installation Path</td><td>$path_copy</td></tr>\n";
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				my $urluser_copy = filter( $urluser );
+				print "<tr><td>Phone home URL username</td><td>$urluser_copy</td></tr>\n";
+				print "<tr><td>Phone home URL password</td><td>****************</td></tr>\n";
+				print "<tr><td>Phone home delay</td><td>$delaytime</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				my $description_copy = filter( $description );
+				print "<tr><td>Windows Service description</td><td>$description_copy</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+				
+			}
+			elsif( $scantype eq "win_agent")
+			{
+				$string = "INSERT INTO profiles SET profile=?,username=?,password=?,domain=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,path=?,phonehomeurl=?,phonehomeuser=?,phonehomepass=?,delaytime=?,description=?,debug=?,concurrent=?,creditcards=?,zipfiles=?,memory=?,mask=?,hash=?,scantype=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $domain, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $path, $url, $urluser, $urlpass, $delaytime, $description, $debug, $concurrent, $creditcards, $zipfiles, $memory, $mask, $smbhash, $scantype );
+
+				print "<heading>New Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				my $smbhash_copy = filter( $smbhash );
+				print "<tr><td>SMBHash</td><td>$smbhash_copy</td></tr>\n";
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				my $domain_copy = filter( $domain );
+				print "<tr><td>Domain Name</td><td>$domain_copy</td></tr>\n";
+				my $path_copy = filter( $path );
+				print "<tr><td>Installation Path</td><td>$path_copy</td></tr>\n";
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				my $urluser_copy = filter( $urluser );
+				print "<tr><td>Phone home URL username</td><td>$urluser_copy</td></tr>\n";
+				print "<tr><td>Phone home URL password</td><td>****************</td></tr>\n";
+				print "<tr><td>Phone home delay</td><td>$delaytime</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				my $description_copy = filter( $description );
+				print "<tr><td>Windows Service description</td><td>$description_copy</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+			elsif( $scantype eq "win_agentless" || $scantype eq "win_share" )
+			{
+				$string = "INSERT INTO profiles SET profile=?,username=?,password=?,domain=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,debug=?,concurrent=?,creditcards=?,zipfiles=?,memory=?,mask=?,hash=?,scantype=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $domain, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $debug, $concurrent, $creditcards, $zipfiles, $memory, $mask, $smbhash, $scantype );
+
+				print "<heading>New Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				my $smbhash_copy = filter( $smbhash );
+				print "<tr><td>SMBHash</td><td>$smbhash_copy</td></tr>\n";
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				my $domain_copy = filter( $domain );
+				print "<tr><td>Domain Name</td><td>$domain_copy</td></tr>\n";
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+			elsif( $scantype eq "unix_agentless" )
+			{
+				$string = "INSERT INTO profiles SET profile=?,username=?,password=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,debug=?,concurrent=?,creditcards=?,zipfiles=?,memory=?,mask=?,scantype=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $debug, $concurrent, $creditcards, $zipfiles, $memory, $mask, $scantype );
+
+				print "<heading>New Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				my $smbhash_copy = filter( $smbhash );
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				my $domain_copy = filter( $domain );
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+			elsif( $scantype =~ /^(mssql_agentless|mysql_agentless)$/ )
+			{
+				$string = "INSERT INTO profiles SET profile=?,username=?,password=?,regex=?,debug=?,concurrent=?,creditcards=?,mask=?,scantype=?,ignore_dbs=?,dbs=?,ignore_tables=?,tables=?,ignore_columns=?,columns=?,rows=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $regex_db, $debug, $concurrent, $creditcards, $mask, $scantype, $db_choice, $dbs, $table_choice, $tables, $column_choice, $columns, $rows );
+
+				print "<heading>New Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+
+				print "<tr><td>Scan databases</td><td>$db_choice</td></tr>\n";
+				my $database_copy = filter( $dbs );
+				print "<tr><td>Databases</td><td>$database_copy</td></tr>\n";
+
+				print "<tr><td>Scan tables</td><td>$table_choice</td></tr>\n";
+				my $table_copy = filter( $tables );
+				print "<tr><td>Tables</td><td>$table_copy</td></tr>\n";
+
+				print "<tr><td>Scan columns</td><td>$column_choice</td></tr>\n";
+				my $column_copy = filter( $columns );
+				print "<tr><td>Columns</td><td>$column_copy</td></tr>\n";
+
+				print "<tr><td>Limit to rows</td><td>$rows</td></tr>\n";
+
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+		}
+		else
+		{
+			print "Duplicate profile name found. Try again with a different profile name.\n\n";
+		}
+		$sth->finish;
+		$dbh->disconnect;
+	}
+	elsif( $is_new == 0 )
+	{
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT profile from profiles where profile=?;";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $profile );
+		my $results = $sth->fetchrow_arrayref();
+		if( $$results[0] ne "" )
+		{
+			my $regex_db = "";
+			my $length_regex = @regexes;
+			my $x_regex = 0;
+			while( $x_regex < $length_regex )
+			{
+				$regex_db .= "$regexes[$x_regex]";
+				if( $x_regex < ($length_regex - 1))
+				{
+					$regex_db .= ",";
+				}
+				$x_regex++;
+			}
+			
+      if ($scantype eq "meta_agent" || $scantype eq "post_agent") {
+        #Use this code once the database is updated!
+        $string = "UPDATE profiles SET profile=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,path=?," .
+                  "phonehomeurl=?,phonehomeuser=?,phonehomepass=?,delaytime=?,description=?,debug=?,concurrent=?," .
+                  "creditcards=?,zipfiles=?,memory=?,mask=?,scantype=?,metahost=?,metaport=?,metauser=?," .
+                  "metapass=?,metapath=?,metalatency=?,metatimeout=?,metassl=? WHERE profile=?;";
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $path, 
+				              $url, $urluser, $urlpass, $delaytime, $description, $debug, $concurrent, 
+				              $creditcards, $zipfiles, $memory, $mask, $scantype, $metahost, $metaport, $metauser, 
+				              $metapass, $metapath, $metalatency, $metatimeout, $metassl, $profile );
+
+				print "<heading>Modified Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+							
+				my $metahost_copy = filter($metahost);
+				my $metaport_copy = filter($metaport);
+				my $metauser_copy = filter($metauser);
+				my $metapass_copy = filter($metapass);
+        my $metapath_copy = filter($metapath);
+        my $metalatency_copy = filter($metalatency);
+        my $metatimeout_copy = filter($metatimeout);
+        
+				print "<tr><td>Metasploit Host</td><td>$metahost_copy</td></tr>\n";
+				print "<tr><td>Metasploit Port</td><td>$metaport_copy</td></tr>\n";
+				print "<tr><td>Using SSL</td><td>";
+				if ($metassl == 1) { print "Yes";}
+				elsif ($metassl == 0) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Metasploit User</td><td>$metauser_copy</td></tr>\n";
+				print "<tr><td>Metasploit Password</td><td>$metapass_copy</td></tr>\n";
+				print "<tr><td>Path to OpenDLP files on Metasploit system</td><td>$metapath_copy</td></tr>\n";
+        print "<tr><td>Latency (used to throttle CPU usage when deploying)</td><td>$metalatency_copy</td></tr>\n";
+        print "<tr><td>Metasploit Timeout (Time to wait for response before giving up)</td><td>$metatimeout_copy</td></tr>\n";
+        
+				my $path_copy = filter( $path );
+				print "<tr><td>Installation Path</td><td>$path_copy</td></tr>\n";
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				my $urluser_copy = filter( $urluser );
+				print "<tr><td>Phone home URL username</td><td>$urluser_copy</td></tr>\n";
+				print "<tr><td>Phone home URL password</td><td>****************</td></tr>\n";
+				print "<tr><td>Phone home delay</td><td>$delaytime</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				my $description_copy = filter( $description );
+				print "<tr><td>Windows Service description</td><td>$description_copy</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+      }
+			elsif( $scantype eq "win_agent")
+			{
+				$string = "UPDATE profiles SET profile=?,username=?,password=?,domain=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,path=?,phonehomeurl=?,phonehomeuser=?,phonehomepass=?,delaytime=?,description=?,debug=?,concurrent=?,creditcards=?,zipfiles=?,memory=?,mask=?,hash=?,scantype=? WHERE profile=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $domain, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $path, $url, $urluser, $urlpass, $delaytime, $description, $debug, $concurrent, $creditcards, $zipfiles, $memory, $mask, $smbhash, $scantype, $profile );
+
+				print "<heading>Modified Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				my $smbhash_copy = filter( $smbhash );
+				print "<tr><td>SMBHash</td><td>$smbhash_copy</td></tr>\n";
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				my $domain_copy = filter( $domain );
+				print "<tr><td>Domain Name</td><td>$domain_copy</td></tr>\n";
+				my $path_copy = filter( $path );
+				print "<tr><td>Installation Path</td><td>$path_copy</td></tr>\n";
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				my $urluser_copy = filter( $urluser );
+				print "<tr><td>Phone home URL username</td><td>$urluser_copy</td></tr>\n";
+				print "<tr><td>Phone home URL password</td><td>****************</td></tr>\n";
+				print "<tr><td>Phone home delay</td><td>$delaytime</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				my $description_copy = filter( $description );
+				print "<tr><td>Windows Service description</td><td>$description_copy</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+			if( $scantype eq "win_agentless" || $scantype eq "win_share" )
+			{
+				$string = "UPDATE profiles SET profile=?,username=?,password=?,domain=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,debug=?,concurrent=?,creditcards=?,zipfiles=?,memory=?,mask=?,hash=?,scantype=? WHERE profile=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $domain, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $debug, $concurrent, $creditcards, $zipfiles, $memory, $mask, $smbhash, $scantype, $profile );
+
+				print "<heading>Modified Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				my $smbhash_copy = filter( $smbhash );
+				print "<tr><td>SMBHash</td><td>$smbhash_copy</td></tr>\n";
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				my $domain_copy = filter( $domain );
+				print "<tr><td>Domain Name</td><td>$domain_copy</td></tr>\n";
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+			if( $scantype eq "unix_agentless" )
+			{
+				$string = "UPDATE profiles SET profile=?,username=?,password=?,exts=?,ignore_exts=?,dirs=?,ignore_dirs=?,regex=?,debug=?,concurrent=?,creditcards=?,zipfiles=?,memory=?,mask=?,scantype=? WHERE profile=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $extensions, $ext_choice, $directories, $dir_choice, $regex_db, $debug, $concurrent, $creditcards, $zipfiles, $memory, $mask, $scantype, $profile );
+
+				print "<heading>Modified Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				my $smbhash_copy = filter( $smbhash );
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				my $domain_copy = filter( $domain );
+				print "<tr><td>Memory Limit</td><td>" . $memory * 100 . "%</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+				print "<tr><td>Scan directories</td><td>$dir_choice</td></tr>\n";
+				my $directories_copy = filter( $directories );
+				print "<tr><td>Directories</td><td>$directories_copy</td></tr>\n";
+				print "<tr><td>Scan file extensions</td><td>$ext_choice</td></tr>\n";
+				my $extensions_copy = filter( $extensions );
+				print "<tr><td>Extensions</td><td>$extensions_copy</td></tr>\n";
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				my $zip_copy = filter( $zipfiles );
+				print "<tr><td>Zip File Extensions</td><td>$zip_copy</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+			elsif( $scantype =~ /^(mssql_agentless|mysql_agentless)$/ )
+			{
+				$string = "UPDATE profiles SET profile=?,username=?,password=?,regex=?,debug=?,concurrent=?,creditcards=?,mask=?,scantype=?,ignore_dbs=?,dbs=?,ignore_tables=?,tables=?,ignore_columns=?,columns=?,rows=? WHERE profile=?;";
+
+				$sth = $dbh->prepare($string);
+				$sth->execute($profile, $username, $password, $regex_db, $debug, $concurrent, $creditcards, $mask, $scantype, $db_choice, $dbs, $table_choice, $tables, $column_choice, $columns, $rows, $profile );
+
+				print "<heading>Modified Profile Submission:</heading><br><br>\n";
+				print "<table class=sample>\n";
+				print "<tr><td width=200>Profile Name</td><td>$profile</td></tr>\n";
+				print "<tr><td>Scan type</td><td>$scantype</td></tr>\n";
+				my $username_copy = filter( $username );
+				print "<tr><td>Username</td><td>$username_copy</td></tr>\n";
+				print "<tr><td>Password</td><td>****************</td></tr>\n";
+				print "<tr><td>Mask Sensitive Data</td><td>";
+				if( $mask == 1 ) { print "Yes"; }
+				elsif( $mask == 0 ) { print "No"; }
+				print "</td></tr>\n";
+
+				print "<tr><td>Scan databases</td><td>$db_choice</td></tr>\n";
+				my $database_copy = filter( $dbs );
+				print "<tr><td>Databases</td><td>$database_copy</td></tr>\n";
+
+				print "<tr><td>Scan tables</td><td>$table_choice</td></tr>\n";
+				my $table_copy = filter( $tables );
+				print "<tr><td>Tables</td><td>$table_copy</td></tr>\n";
+
+				print "<tr><td>Scan columns</td><td>$column_choice</td></tr>\n";
+				my $column_copy = filter( $columns );
+				print "<tr><td>Columns</td><td>$column_copy</td></tr>\n";
+
+				print "<tr><td>Limit to rows</td><td>$rows</td></tr>\n";
+
+				print "<tr><td>Regular Expressions</td><td>";
+				my @regex_lookups = split(",", $regex_db );
+				my $length_regex_lookups = @regex_lookups;
+				my $regex_lookups_x = 0;
+				foreach( @regex_lookups )
+				{
+					$string = "SELECT name from regexes where number=?;";
+					$sth = $dbh->prepare($string);
+					$sth->execute($_);
+					my $results = $sth->fetchrow_arrayref();
+					if( $$results[0] ne "" )
+					{
+						print "$$results[0]";
+					}
+					else
+					{
+						print "<font face=red>Cannot find regex #" . $_ . "</font>";
+					}
+					if( $regex_lookups_x < ($length_regex_lookups - 1 ))
+					{
+						print ", ";
+					}
+					$regex_lookups_x++;
+				}
+
+				print "</td></tr>\n";
+				my $cc_copy = filter( $creditcards );
+				print "<tr><td>Credit Cards</td><td>$cc_copy</td></tr>\n";
+				print "<tr><td>Concurrent deployments</td><td>$concurrent</td></tr>\n";
+				print "<tr><td>Log Verbosity</td><td>$debug</td></tr>\n";
+				print "</table>\n";
+			}
+		}
+		else
+		{
+			print "Could not find profile to update.\n\n";
+		}
+		$sth->finish;
+		$dbh->disconnect;
+	}
+}
+
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'profiles\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub filter
+{
+	my $thing = shift;
+	$thing =~ s/\&/\&amp;/g;
+	$thing =~ s/\#/&#35;/g;
+	$thing =~ s/"/&#34;/g;
+	$thing =~ s/\%/&#37;/g;
+	$thing =~ s/\'/&#39;/g;
+	$thing =~ s/\//&#47;/g;
+	$thing =~ s/</&#60;/g;
+	$thing =~ s/>/&#62;/g;
+	$thing =~ s/\[/&#91;/g;
+	$thing =~ s/\\/&#92;/g;
+	$thing =~ s/\]/&#93;/g;
+	$thing =~ s/`/&#96;/g;
+	$thing =~ s/{/&#123;/g;
+	$thing =~ s/\|/&#124;/g;
+	$thing =~ s/}/&#125;/g;
+	return $thing;
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

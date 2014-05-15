@@ -1,0 +1,406 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+use POSIX qw( floor );
+
+my $version = get_version();
+my $db_admin_file = "../etc/db_admin";
+my $is_valid = 1;
+my %systems = ();
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+my ($db_username, $db_password) = split( ":", $db_line );
+header();
+my $query = CGI->new;
+my $scanname = $query->param('scanname');
+if( $scanname ne "" && $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+{
+	$is_valid = 0;
+	print "Invalid scan name<br><br>\n";
+}
+
+my $system = $query->param('system');
+if( $system ne "" && $system !~ /^[A-Z0-9]{32}$/ )
+{
+	$is_valid = 0;
+	print "Invalid system tracker<br><br>\n";
+}
+
+if( $is_valid )
+{
+	print "<heading>View Logs</heading><br><br>\n";
+
+	# if no arguments are given
+	if( $system eq "" && $scanname eq "" )
+	{
+		print "<form method=GET action=logs.html>\n";
+		print "<table class=sample>\n";
+		print "<tr><td>Details</td><td>Scan name</td></tr>\n";
+
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT DISTINCT scan FROM logs";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute();
+		while( my $results = $sth->fetchrow_arrayref() )
+		{
+			print "<tr><td><input type=radio name=scanname value=\"$$results[0]\"></td>";
+			print "<td>$$results[0]</td></tr>\n";
+		}
+		print "<tr><td colspan=2><input type=submit value=\"View Logs\"</td></tr>\n";
+		print "</table></form>\n";
+		$sth->finish();
+		$dbh->disconnect();
+	}
+
+	# if scanname is given as an argument, but not system
+	elsif( $scanname ne "" && $system eq "" )
+	{
+		print "Select a system to view its logs for scan \"$scanname\":<br><br>\n";
+		print "<form method=GET action=logs.html>\n";
+		print "<input type=hidden name=scanname value=\"$scanname\">\n";
+		print "<table class=sample>\n";
+		print "<tr><td><br></td><td>Network name</td><td>IP address</td><td>Status</td><td>Step</td><td>Files done</td><td>Total files</td><td>Bytes done</td><td>Total bytes</td><td>Updated</td><td>Findings</td><td>Log Entries</td></tr>\n";
+
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT DISTINCT tracker,system,ip,status,filestotal,filesdone,bytestotal,bytesdone,updated,control FROM systems WHERE scan=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $scanname );
+		while( my $results = $sth->fetchrow_arrayref() )
+		{
+			$system{$$results[0]}{system} = $$results[1];
+			$system{$$results[0]}{ip} = $$results[2];
+			$system{$$results[0]}{status} = $$results[3];
+			$system{$$results[0]}{filestotal} = $$results[4];
+			$system{$$results[0]}{filesdone} = $$results[5];
+			$system{$$results[0]}{bytestotal} = $$results[6];
+			$system{$$results[0]}{bytesdone} = $$results[7];
+			$system{$$results[0]}{updated} = $$results[8];
+			$system{$$results[0]}{control} = $$results[9];
+		}
+
+		foreach my $tracking( sort( keys( %system )))
+		{
+			my $string = "SELECT COUNT(*) FROM results WHERE scan=? AND tracker=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $scanname, $tracking );
+			my $results = $sth->fetchrow_arrayref();
+			$system{$tracking}{count} = $$results[0];
+
+			my $string = "SELECT COUNT(*) FROM logs WHERE scan=? AND tracker=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $scanname, $tracking );
+			my $results = $sth->fetchrow_arrayref();
+			$system{$tracking}{logs} = $$results[0];
+
+			print "\n<tr><td><input type=radio name=system value=$tracking></td>\n";
+			print "<td>$system{$tracking}{system}</td>\n";
+			my $printme_ip = $system{$tracking}{ip};
+			$printme_ip = replacechars( $printme_ip );
+			print "<td>$printme_ip</td>\n";
+			print "<td>$system{$tracking}{control}</td>\n";
+			if( $system{$tracking}{status} == -1 ) { print "<td>-1: Deploying</td>\n"; }
+			elsif( $system{$tracking}{status} == 0 ) { print "<td>0: All files</td>\n"; }
+			elsif( $system{$tracking}{status} == 1 ) { print "<td>1: Whitelisting</td>\n"; }
+			elsif( $system{$tracking}{status} == 2 ) { print "<td>2: Scanning</td>\n"; }
+			elsif( $system{$tracking}{status} == 3 ) { print "<td>3: Done</td>\n"; }
+			if( $system{$tracking}{filesdone} ne "" )
+			{
+				print "<td align=right>" . commify($system{$tracking}{filesdone}) . "</td>\n";
+			}
+			else
+			{
+				print "<td align=right>N/A</td>\n";
+			}
+			if( $system{$tracking}{filestotal} ne "" )
+			{
+				print "<td align=right>" . commify($system{$tracking}{filestotal}) . "</td>\n";
+			}
+			else
+			{
+				print "<td align=right>N/A</td>\n";
+			}
+			if( $system{$tracking}{bytesdone} ne "" )
+			{
+				print "<td align=right>" . commify($system{$tracking}{bytesdone}) . "</td>\n";
+			}
+			else
+			{
+				print "<td align=right>N/A</td>\n";
+			}
+			if( $system{$tracking}{bytestotal} ne "" )
+			{
+				print "<td align=right>" . commify($system{$tracking}{bytestotal}) . "</td>\n";
+			}
+			else
+			{
+				print "<td align=right>N/A</td>\n";
+			}
+			my $time = localtime( $system{$tracking}{updated} );
+			my $currenttime = time();
+			my $time_diff = $currenttime - $system{$tracking}{updated};
+			my $hours = floor($time_diff / 3600);
+			my $leftovers = $time_diff % 3600;
+			my $minutes = floor($leftovers / 60);
+			my $seconds = $time_diff % 60;
+			if( $hours < 10 ) { $hours = "0" . $hours; }
+			if( $minutes < 10 ) { $minutes = "0" . $minutes; }
+			if( $seconds < 10 ) { $seconds = "0" . $seconds; }
+			print "<td>$hours:$minutes:$seconds ago</td>\n";
+			print "<td align=right>$system{$tracking}{count}</td>\n";
+			print "<td align=right>$system{$tracking}{logs}</td>\n";
+
+			print "</tr>\n";
+		}
+		print "<tr><td colspan=12><input type=submit value=\"View Logs\"></td></tr></table>\n";
+		$sth->finish();
+		$dbh->disconnect();
+	}
+
+	# look at details of specific system
+	elsif( $scanname ne "" && $system ne "" )
+	{
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT system,ip,status,filestotal,filesdone,bytestotal,bytesdone,updated,profile,control FROM systems WHERE scan=? AND tracker=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $scanname, $system );
+		my $results = $sth->fetchrow_arrayref();
+		my $hostname = $$results[0];
+		my $ip = $$results[1];
+		my $status = $$results[2];
+		my $filestotal = $$results[3];
+		my $filesdone = $$results[4];
+		my $bytestotal = $$results[5];
+		my $bytesdone = $$results[6];
+		my $updated = $$results[7];
+		my $profile = $$results[8];
+		my $control = $$results[9];
+
+		my $string = "SELECT COUNT(*) FROM results WHERE scan=? AND tracker=?";
+		$sth = $dbh->prepare( $string );
+		$sth->execute( $scanname, $system );
+		my $results = $sth->fetchrow_arrayref();
+		my $total = $$results[0];
+
+		my $string = "SELECT COUNT(*) FROM results WHERE scan=? AND tracker=? AND is_false=\"1\"";
+		$sth = $dbh->prepare( $string );
+		$sth->execute( $scanname, $system );
+		my $results = $sth->fetchrow_arrayref();
+		my $fp_count = $$results[0];
+
+		my $printme_ip = $ip;
+		$printme_ip = replacechars( $printme_ip );
+		print "Logs for $printme_ip";
+		if( $hostname ne "" )
+		{
+			print " ($hostname)";
+		}
+		print ":<br><br>\n";
+
+		print "<table class=sample>\n";
+		print "<tr><td>Profile</td><td align=right>$profile</td></tr>\n";
+		print "<tr><td>Status</td><td align=right>$control</td></tr>\n";
+		print "<tr><td>Step</td><td align=right>\n";
+		if( $status == -1 ) { print "-1: Deploying\n"; }
+		elsif( $status == 0 ) { print "0: All files\n"; }
+		elsif( $status == 1 ) { print "1: Whitelisting\n"; }
+		elsif( $status == 2 ) { print "2: Scanning\n"; }
+		elsif( $status == 3 ) { print "3: Done\n"; }
+		print "</td></tr>\n";
+		print "<tr><td>Files Done</td>\n";
+		if( $filesdone ne "" )
+		{
+			print "<td align=right>" . commify($filesdone) . "</td></tr>\n";
+		}
+		else
+		{
+			print "<td align=right>N/A</td></tr>\n";
+		}
+		print "<tr><td>Files Total</td>\n";
+		if( $filestotal ne "" )
+		{
+			print "<td align=right>" . commify($filestotal) . "</td></tr>\n";
+		}
+		else
+		{
+			print "<td align=right>N/A</td></tr>\n";
+		}
+		print "<tr><td>Bytes Done</td>\n";
+		if( $bytesdone ne "" )
+		{
+			print "<td align=right>" . commify($bytesdone) . "</td></tr>\n";
+		}
+		else
+		{
+			print "<td align=right>N/A</td></tr>\n";
+		}
+		print "<tr><td>Bytes Total</td>\n";
+		if( $bytestotal ne "" )
+		{
+			print "<td align=right>" . commify($bytestotal) . "</td></tr>\n";
+		}
+		else
+		{
+			print "<td align=right>N/A</td></tr>\n";
+		}
+		print "<tr><td>Total Findings</td><td align=right>$total</td></tr>\n";
+		print "<tr><td>False Positives</td><td align=right>$fp_count</td></tr>\n";
+		my $diff = $total - $fp_count;
+		print "<tr><td>Valid Findings</td><td align=right>$diff</td></tr>\n";
+		my $currenttime = time();
+		my $updatedtime = localtime( $updated );
+		my $timediff = $currenttime - $updated;
+		print "<tr><td>Updated</td><td align=right>";
+		my $hours = floor($timediff / 3600);
+		my $leftovers = $timediff % 3600;
+		my $minutes = floor($leftovers / 60);
+		my $seconds = $timediff % 60;
+		if( $hours < 10 ) { $hours = "0" . $hours; }
+		if( $minutes < 10 ) { $minutes = "0" . $minutes; }
+		if( $seconds < 10 ) { $seconds = "0" . $seconds; }
+		print "$hours:$minutes:$seconds ago</td></tr>\n";
+		print "</table><br><br>\n";
+
+		print "<table class=sample>\n";
+		print "<tr><td>#</td>\n";
+		print "<td width=175>Timestamp</td>\n";
+		print "<td>Log Entry</td></tr>\n";
+
+		my $string = "SELECT updated,data FROM logs WHERE scan=? AND tracker=? ORDER BY updated,line";
+		$sth = $dbh->prepare( $string );
+		$sth->execute( $scanname, $system );
+		my $row_counter = 1;
+		while( my $results = $sth->fetchrow_arrayref() )
+		{
+			my $timestamp = $$results[0];
+			my $logdata = $$results[1];
+
+			print "<tr><td>$row_counter</td>\n";
+			$row_counter++;
+			my $time = localtime( $$results[0] );
+			print "<td>$time</td>\n";
+			chomp( $logdata );
+			$logdata = replacechars( $logdata );
+			print "<td>$logdata</td>\n";
+		}
+		print "</table>\n";
+		$sth->finish();
+		$dbh->disconnect();
+	}
+}
+
+
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0>\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub replacechars
+{
+	my $string = shift;
+
+	$string =~ s/\&/\&amp;/g;
+	$string =~ s/\#/&#35;/g;
+	$string =~ s/"/&#34;/g;
+	$string =~ s/\%/&#37;/g;
+	$string =~ s/\'/&#39;/g;
+	$string =~ s/\//&#47;/g;
+	$string =~ s/</&#60;/g;
+	$string =~ s/>/&#62;/g;
+	$string =~ s/\[/&#91;/g;
+	$string =~ s/\\/&#92;/g;
+	$string =~ s/\]/&#93;/g;
+	$string =~ s/`/&#96;/g;
+	$string =~ s/{/&#123;/g;
+	$string =~ s/\|/&#124;/g;
+	$string =~ s/}/&#125;/g;
+	$string =~ s/\(/&#40;/g;
+	$string =~ s/\)/&#41;/g;
+	$string =~ s/\n//g;
+	$string =~ s/\r//g;
+	$string =~ s/\ /&nbsp;/g;
+
+	return $string;
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+
+sub commify
+{
+	my $input = shift;
+	$input = reverse $input;
+	$input =~ s/(\d\d\d)(?=\d)(?!\d*\.)/$1,/g;
+	return reverse $input;
+}

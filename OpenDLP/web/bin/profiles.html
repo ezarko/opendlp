@@ -1,0 +1,1372 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+
+my $version = get_version();
+my $db_admin_file = "../etc/db_admin";
+my( $db_username, $db_password ) = "";
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+my $query = CGI->new;
+my $old_profile = $query->param('edit');
+
+my( $old_username, $old_password, $old_domain, $old_exts, $old_ignore_exts, $old_dirs, $old_ignore_dirs ) = "";
+my( $old_regex, $old_path, $old_phonehomeurl, $old_phonehomeuser, $old_phonehomepass, $old_delaytime ) = "";
+my( $old_description, $old_debug, $old_concurrent, $old_creditcards, $old_zipfiles ) = "";
+my( $old_memory, $old_mask ) = "";
+my( $old_ignore_dbs, $old_dbs, $old_ignore_tables, $old_tables, $old_ignore_columns ) = "";
+my( $old_columns, $old_rows, $old_scantype ) = "";
+my $old_smbhash = "";
+my $old_found = 0;
+my ($old_metahost, $old_metaport, $old_metauser, $old_metapass, $old_metapath, $old_metassl) = "";
+my $old_metalatency = 100;
+my $old_timeout = 30;
+
+if( $old_profile ne "" )
+{
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $string = "SELECT * from profiles where profile=?";
+	my $sth = $dbh->prepare( $string );
+	$sth->execute( $old_profile );
+	$results = $sth->fetchrow_arrayref();
+
+	$old_username = $$results[1];
+	$old_password = $$results[2];
+	$old_domain = $$results[3];
+	$old_exts = $$results[4];
+	$old_ignore_exts = $$results[5];
+	$old_dirs = $$results[6];
+	$old_ignore_dirs = $$results[7];
+	$old_regex = $$results[8];
+	$old_path = $$results[9];
+	$old_phonehomeurl = $$results[10];
+	$old_phonehomeuser = $$results[11];
+	$old_phonehomepass = $$results[12];
+	$old_delaytime = $$results[13];
+	$old_description = $$results[14];
+	$old_debug = $$results[15];
+	$old_concurrent = $$results[17];
+	$old_creditcards = $$results[18];
+	$old_zipfiles = $$results[19];
+	$old_memory = $$results[20];
+	$old_mask = $$results[21];
+	$old_smbhash = $$results[22];
+	$old_ignore_dbs = $$results[23];
+	$old_dbs = $$results[24];
+	$old_ignore_tables = $$results[25];
+	$old_tables = $$results[26];
+	$old_ignore_columns = $$results[27];
+	$old_columns = $$results[28];
+	$old_rows = $$results[29];
+	$old_scantype = $$results[30];
+	$old_metahost = $$results[31];
+	$old_metaport = $$results[32];
+	$old_metalatency = $$results[33];
+	$old_metauser = $$results[34];
+	$old_metapass = $$results[35];
+  $old_metapath = $$results[36];
+  $old_metatimeout = $$results[37];
+  $old_metassl = $$results[38];
+   
+	$sth->finish;
+	$dbh->disconnect;
+
+	if( $$results[0] ne "" )
+	{
+		$old_found = 1;
+	} 
+}
+
+header();
+print qq {
+<heading>Create a new scan profile<br><br>
+<form method=post action=profiles-new.html name=profile onsubmit="return validate_form(this);">
+<table class=sample>
+};
+
+print "<tr><td width=200>Profile Name <a href=help.html#profile onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td width=500><input name=profilename size=30";
+if( $old_found == 1 )
+{
+	print " value=\"$old_profile\"";
+}
+print "></td></tr>\n";
+  
+if( $old_found == 0 )
+{
+	print "<tr><td>Scan Type <a href=help.html#scantype onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td><select name=scantype onchange=\"changeList(this)\"><option></option>\n";
+	print "<option value=win_agent>Windows Filesystem (agent)</option>\n";
+  print "<option value=meta_agent>Metasploit (agent) - Meterpreter deployment</option>\n";
+  print "<option value=post_agent>Metasploit (agent) - Post Module deployment (for Armitage compatibility)</option>\n";
+	print "<option>----------</option>\n";
+	print "<option value=win_agentless>Windows Filesystem (agentless over SMB)</option>\n";
+	print "<option value=win_share>Windows Network Share (agentless over SMB)</option>\n";
+	print "<option value=unix_agentless>UNIX Filesystem (agentless over SSH)</option>\n";
+	print "<option>----------</option>\n";
+	print "<option value=mssql_agentless>Microsoft SQL Server (agentless)</option>\n";
+	print "<option value=mysql_agentless>MySQL (agentless)</option>\n";
+}
+else
+{
+	print "<tr><td>Scan Type <a href=help.html#scantype onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td><select name=scantype onchange=\"changeList(this)\"><option></option>\n";
+
+	print "<option value=win_agent";
+	if( $old_scantype eq "win_agent" ) { print " selected"; }
+	print ">Windows Filesystem (agent)</option>\n";
+
+	print "<option value=meta_agent";
+	if ($old_scantype eq "meta_agent" ) { print " selected"; }
+	print ">Metasploit (agent) - Meterpreter deployment</opion>\n";
+	
+  print "<option value=post_agent";
+  if ($old_scantype eq "post_agent") { print " selected"; }
+  print ">Metasploit (agent) - Post Module deployment (for Armitage compatibility)</option>\n";
+	
+	print "<option>----------</option>\n";
+
+	print "<option value=win_agentless";
+	if( $old_scantype eq "win_agentless" ) { print " selected"; }
+	print ">Windows Filesystem (agentless over SMB)</option>\n";
+
+	print "<option value=win_share";
+	if( $old_scantype eq "win_share" ) { print " selected"; }
+	print ">Windows Network Share (agentless over SMB)</option>\n";
+
+	print "<option value=unix_agentless";
+	if( $old_scantype eq "unix_agentless" ) { print " selected"; }
+	print ">UNIX Filesystem (agentless over SSH)</option>\n";
+
+	print "<option>----------</option>\n";
+
+	print "<option value=mssql_agentless";
+	if( $old_scantype eq "mssql_agentless" ) { print " selected"; }
+	print ">Microsoft SQL Server (agentless)</option>\n";
+
+	print "<option value=mysql_agentless";
+	if( $old_scantype eq "mysql_agentless" ) { print " selected"; }
+	print ">MySQL (agentless)</option>\n";
+	
+}
+
+print "</select></td></tr>\n";
+
+print "<tr><td>Mask Sensitive Data? <a href=help.html#mask onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td><input name=mask type=checkbox value=1 ";
+if( $old_found == 1 )
+{
+	if( $old_mask == 1 )
+	{
+		print "checked";
+	}
+}
+else
+{
+	print "checked";
+}
+print "></td></tr>\n";
+print "</table>\n";
+
+print "<div id=os_credentials>\n";
+print "<table class=sample>\n";
+# username
+print "<tr><td width=200>Username <a href=help.html#username onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td width=500><input name=username size=30";
+if( $old_found == 1 )
+{
+	print " value=\"$old_username\"";
+}
+print "></td></tr>\n";
+
+# password
+if( $old_found != 1 )
+{
+	print "<tr><td>Password <a href=help.html#password onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td><input name=password type=password size=30></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Password</td><td><input name=password type=password size=30 value=\"$old_password\"></td></tr>\n";
+}
+print "</table></div>\n";
+
+print "<div id=domain>\n";
+print "<table class=sample>\n";
+# domain
+print "<tr><td width=200>Windows Domain/Workgroup <a href=help.html#domain onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(For Windows OS scans (except Windows Share scans): Required.<br>For MSSQL DB scans:<li>Specify if you are using OS account<li>Leave blank if using DB account</td><td width=500><input name=domain size=30";
+if( $old_found == 1 )
+{
+	print " value=\"$old_domain\"";
+}
+print "></td></tr>\n";
+print "</table></div>\n";
+
+print "<div id=db_options>\n";
+print "<table class=sample>\n";
+
+# databases
+if( $old_found == 0 )
+{
+	print "<tr><td width=200>Databases <a href=help.html#databases onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the database names in this list)</td><td width=500>\n";
+	print '<input type=radio name=db_choice value=everything onclick="document.profile.databases.disabled=true">Scan all databases</input><br>' . "\n";
+	print '<input type=radio name=db_choice value=ignore checked onclick="document.profile.databases.disabled=false">Scan all databases except these</input><br>' . "\n";
+	print '<input type=radio name=db_choice value=allow onclick="document.profile.databases.disabled=false">Only scan the following databases</input><br>' . "\n";
+	print "<textarea name=databases rows=10 cols=60>master\n";
+	print "tempdb\n";
+	print "model\n";
+	print "msdb\n";
+	print "pubs\n";
+	print "Northwind";
+	print "</textarea>\n";
+	print "</td></tr>\n";
+}
+else
+{
+	print "<tr><td width=200>Databases <a href=help.html#databases onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the database names in this list)</td><td width=500>\n";
+	print '<input type=radio name=db_choice value=everything onclick="document.profile.databases.disabled=true"';
+	if( $old_ignore_dbs eq "everything" ) { print " checked"; }
+	print ">Scan all databases</input><br>\n";
+	print '<input type=radio name=db_choice value=ignore onclick="document.profile.databases.disabled=false"';
+	if( $old_ignore_dbs eq "ignore" ) { print " checked"; }
+	print ">Scan all databases except these</input><br>\n";
+	print '<input type=radio name=db_choice value=allow onclick="document.profile.databases.disabled=false"';
+	if( $old_ignore_dbs eq "allow" ) { print " checked"; }
+	print ">Only scan the following databases</input><br>\n";
+	print "<textarea name=databases rows=10 cols=60>$old_dbs</textarea><br></td></tr>\n";
+}
+
+# tables
+if( $old_found == 0 )
+{
+	print "<tr><td width=200>Tables <a href=help.html#tables onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the table names in this list)</td><td width=500>\n";
+	print '<input type=radio name=table_choice value=everything onclick="document.profile.tables.disabled=true">Scan all tables</input><br>' . "\n";
+	print '<input type=radio name=table_choice value=ignore checked onclick="document.profile.tables.disabled=false">Scan all tables except these</input><br>' . "\n";
+	print '<input type=radio name=table_choice value=allow onclick="document.profile.tables.disabled=false">Only scan the following tables</input><br>' . "\n";
+	print "<textarea name=tables rows=10 cols=60>syssegments\n";
+	print "sysconstraints\n";
+	print "dtproperties";
+	print "</textarea>\n";
+	print "</td></tr>\n";
+}
+else
+{
+	print "<tr><td width=200>Tables <a href=help.html#tables onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the table names in this list)</td><td width=500>\n";
+	print '<input type=radio name=table_choice value=everything onclick="document.profile.tables.disabled=true"';
+	if( $old_ignore_tables eq "everything" ) { print " checked"; }
+	print ">Scan all tables</input><br>\n";
+	print '<input type=radio name=table_choice value=ignore onclick="document.profile.tables.disabled=false"';
+	if( $old_ignore_tables eq "ignore" ) { print " checked"; }
+	print ">Scan all tables except these</input><br>\n";
+	print '<input type=radio name=table_choice value=allow onclick="document.profile.tables.disabled=false"';
+	if( $old_ignore_tables eq "allow" ) { print " checked"; }
+	print ">Only scan the following tables</input><br>\n";
+	print "<textarea name=tables rows=10 cols=60>$old_tables</textarea><br></td></tr>\n";
+}
+
+# columns
+if( $old_found == 0 )
+{
+	print "<tr><td width=200>Columns <a href=help.html#columns onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the column names in this list)</td><td width=500>\n";
+	print '<input type=radio name=column_choice value=everything checked onclick="document.profile.columns.disabled=true">Scan all columns</input><br>' . "\n";
+	print '<input type=radio name=column_choice value=ignore onclick="document.profile.columns.disabled=false">Scan all columns except these</input><br>' . "\n";
+	print '<input type=radio name=column_choice value=allow onclick="document.profile.columns.disabled=false">Only scan the following columns</input><br>' . "\n";
+	print "<textarea name=columns rows=10 cols=60 disabled></textarea>\n";
+	print "</td></tr>\n";
+}
+else
+{
+	print "<tr><td width=200>Columns <a href=help.html#columns onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the column names in this list)</td><td width=500>\n";
+	print '<input type=radio name=column_choice value=everything onclick="document.profile.columns.disabled=true"';
+	if( $old_ignore_columns eq "everything" ) { print " checked"; }
+	print ">Scan all columns</input><br>\n";
+	print '<input type=radio name=column_choice value=ignore onclick="document.profile.columns.disabled=false"';
+	if( $old_ignore_columns eq "ignore" ) { print " checked"; }
+	print ">Scan all columns except these</input><br>\n";
+	print '<input type=radio name=column_choice value=allow onclick="document.profile.columns.disabled=false"';
+	if( $old_ignore_columns eq "allow" ) { print " checked"; }
+	print ">Only scan the following columns</input><br>\n";
+	print "<textarea name=columns rows=10 cols=60>$old_columns</textarea><br></td></tr>\n";
+}
+
+if( $old_found == 0 )
+{
+	print "<tr><td>Limit columns to X rows <a href=help.html#rows onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Use \"0\" to get all rows)</td><td><input name=rows width=30 value=1000></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Limit columns to X rows <a href=help.html#rows onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Use \"0\" to get all rows)</td><td><input name=rows width=30 value=" . $old_rows . "></td></tr>\n";
+}
+
+
+print "</table>\n";
+print "<!-- end of MSSQL div //-->\n\n";
+print "</div>\n";
+######################
+# End of MSSQL <div> #
+######################
+
+
+print "<div id=meta_agent_options>\n";
+print "<table class=sample>\n";
+
+print "<tr><td width=200>Metasploit Host <a href=help.html#metahost onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>IP of running Metasploit console.</small></td><td width=500><input name=metahost size=30";
+if( $old_found == 1 ) {
+  print " value=\"$old_metahost\"";
+}
+print ">&nbsp;&nbsp;&nbsp; <input name=metassl type=checkbox value=1 ";
+if ($old_found == 1 && $old_metassl) { 
+  print "checked";
+}
+print ">Use SSL?</input></td></tr>\n";
+
+print "<tr><td width=200>Metasploit Port <a href=help.html#metaport onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>Port of running Metasploit console.</small></td><td width=500><input name=metaport size=30";
+if( $old_found == 1 ) {
+  print " value=\"$old_metaport\"";
+} else {
+  print " value=\"55552\"";
+}
+print "></td></tr>\n";
+
+print "<tr><td width=200>Metasploit User <a href=help.html#metauser onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>xmlrpc username.</small></td><td width=500><input name=metauser size=30";
+if( $old_found == 1 ) {
+  print " value=\"$old_metauser\"" ;
+} else {
+  print " value=\"msf\"";
+}
+print "></td></tr>\n";
+
+print "<tr><td width=200>Metasploit Password <a href=help.html#metapass onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>xmlrpc password.</small></td><td width=500><input name=metapass size=30";
+if( $old_found == 1 ) {
+  print " value=\"$old_metapass\"" ;
+}
+print " type=password></td></tr>\n";
+
+print "<tr><td width=200>Path to OpenDLP files <a href=help.html#metapath onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a>";
+print "<br><small>Location on Metasploit system</small></td><td width=500><input name=metapath size=40 value=\"";
+if ($old_found == 1) {
+  print "$old_metapath";
+} else {
+  print 'C:\OpenDLP\bin';
+}
+print "\"></td></tr>\n";
+
+print "<tr><td width=200>Metasploit Latency (ms) <a href=help.html#metalatency onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a>";
+print "<br><small>Leave alone unless CPU usage high</small></td><td width=500><input name=metalatency size=30 value=\"";
+if ($old_found == 1) {
+  print "$old_metalatency";
+} else {
+  print "100";
+}
+print "\"></td></tr>\n";
+
+print "<tr><td width=200>Metasploit Timeout (s) <a href=help.html#metatimeout onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a>";
+print "<br><small>Time to wait for response before giving up</small></td><td width=500><input name=metatimeout size=30 value=\"";
+if ($old_found == 1) {
+  print "$old_metatimeout";
+} else {
+  print "30";
+}
+print "\"></td></tr>\n";
+
+
+print "</table></div>\n";
+print "<!-- end of meta_agent_options //-->\n";
+
+
+print "<div id=smbhash>\n";
+print "<table class=sample>\n";
+print "<tr><td width=200>SMBHash <a href=help.html#smbhash onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td width=500><input name=smbhash size=65";
+if( $old_found == 1 )
+{
+        print " value=\"$old_smbhash\"";
+}
+print "></td></tr>\n";
+print "</table>\n";
+print "<!-- end of SMBhash div //-->\n\n";
+print "</div>\n";
+
+print "<div id=win_agent_options>\n";
+print "<table class=sample>\n";
+
+
+if( $old_found == 0 )
+{
+	print "<tr><td width=200>Installation Path <a href=help.html#install_path onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Must be new directory. Be aware temporary files may be readable by other users.)</td><td width=500><input name=path size=30 value=\"c:\\Program Files\\OpenDLP\"></td></tr>\n";
+}
+else
+{
+	print "<tr><td width=200>Installation Path <a href=help.html#install_path onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Must be new directory)</td><td width=500><input name=path size=30 value=\"$old_path\"></td></tr>\n";
+}
+print "</table></div>\n";
+print "<!-- end of win_agent_options //-->\n";
+
+
+print "<div id=memory>\n";
+print "<table class=sample>\n";
+if( $old_found == 0 )
+{
+	print qq {
+	<tr><td width=200>Memory Limit <a href=help.html#memory onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(as percent of target system's total RAM)</td>
+	<td width=500><select name=memory>
+	<option value=".01">1%</option>
+	<option value=".02">2%</option>
+	<option value=".05">5%</option>
+	<option value=".1" selected>10%</option>
+	<option value=".15">15%</option>
+	<option value=".2">20%</option>
+	<option value=".25">25%</option>
+	</select></td></tr>
+	};
+}
+else
+{
+	print "<tr><td width=200>Memory Limit <a href=help.html#memory onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(as percent of target system's total RAM)</td>\n";
+	print "<td width=500><select name=memory>\n";
+	my @percents = ( .01, .02, .05, .1, .15, .2, .25 );
+	foreach my $percent( @percents )
+	{
+		print "<option value=\"$percent\"";
+		if( $old_memory == $percent )
+		{
+			print " selected";
+		}
+		print ">" . $percent * 100 . "%</option>\n";
+	}
+	print "</select></td></tr>\n";
+}
+print "</table></div>\n";
+print "<!-- end of memory div //-->\n";
+
+print "<div id=win_agent_options_3>\n";
+print "<table class=sample>\n";
+print qq {
+<tr><td width=200>Directories <a href=help.html#directories onclick="return popup(this, 'help')"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the file extensions in this list)</td><td width=500>
+};
+if( $old_found == 0 )
+{
+	print qq {
+<input type=radio name=dir_choice value=everything onclick="document.profile.directories.disabled=true">Scan all directories</input><br>
+<input type=radio name=dir_choice value=ignore checked onclick="document.profile.directories.disabled=false">Scan all directories except these (recursive)</input><br>
+<input type=radio name=dir_choice value=allow onclick="document.profile.directories.disabled=false">Only scan the following directories (recursive)</input><br>
+<textarea name=directories rows=10 cols=60>c:\\windows
+c:\\winnt
+c:\\System Volume Information
+%OPENDLP%</textarea><br>
+</td></tr>};
+}
+else
+{
+	print '<input type=radio name=dir_choice value=everything onclick="document.profile.directories.disabled=true"';
+	if( $old_ignore_dirs eq "everything" ) { print " checked"; }
+	print ">Scan all directories</input><br>\n";
+	print '<input type=radio name=dir_choice value=ignore onclick="document.profile.directories.disabled=false"';
+	if( $old_ignore_dirs eq "ignore" ) { print " checked"; }
+	print ">Scan all directories except these (recursive)</input><br>\n";
+	print '<input type=radio name=dir_choice value=allow onclick="document.profile.directories.disabled=false"';
+	if( $old_ignore_dirs eq "allow" ) { print " checked"; }
+	print ">Only scan the following directories (recursive)</input><br>\n";
+	print "<textarea name=directories rows=10 cols=60>$old_dirs</textarea><br></td></tr>\n";
+}
+	
+print "<tr><td>File Extensions <a href=help.html#extensions onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the file extensions in this list)</td><td>\n";
+if( $old_found == 0 )
+{
+print qq {
+<input type=radio name=ext_choice value=everything onclick="document.profile.extensions.disabled=true">Scan all files</input><br>
+<input type=radio name=ext_choice value=ignore checked onclick="document.profile.extensions.disabled=false">Scan all files except files with the following extensions</input><br>
+<input type=radio name=ext_choice value=allow onclick="document.profile.extensions.disabled=false">Only scan files with the following file extensions</input><br>
+<textarea name=extensions rows=10 cols=60>323
+386
+3g2
+3gp
+3gp2
+3gpp
+7z
+aac
+aca
+ace
+aif
+aifc
+aiff
+al
+amc
+ani
+arj
+asx
+au
+au3
+avi
+bmp
+bz
+bz2
+cab
+caf
+cda
+cdda
+cdf
+cdx
+cgi
+chm
+chr
+cmf
+cnv
+cod
+com
+ctx
+datasource
+del
+dep
+dev
+devp
+dib
+dl_
+dll
+dmg
+don
+dpbcc
+drv
+dsp
+elm
+exe
+flt
+fon
+frm
+gen
+gif
+gz
+hiv
+hlp
+hpp
+hxs
+hxx
+ico
+idl
+inf
+ink
+inl
+ism
+iso
+jfif
+jpe
+jpeg
+jpg
+ldf
+lex
+lib
+lic
+lng
+lnk
+lxa
+m3u
+mdi
+mib
+mid
+miv
+mk
+mmp
+mov
+mp2
+mp2v
+mp3
+mp4
+mpampe
+mpeg
+mpegmpv2maw
+mpg
+mpq
+msi
+msp
+ncb
+nlb
+nls
+nrg
+o
+obj
+ocx
+otf
+p
+pch
+pct
+pf
+pfm
+pic
+pict
+pll
+pm
+pnf
+png
+pnt
+pntg
+ppi
+psp
+pst
+pyc
+pyo
+pywqpa
+qt
+qti
+qtif
+qtl
+rar
+rb
+rbw
+rc
+rc2
+rco
+rdd
+rmi
+rnd
+s
+scr
+sd2
+sst
+sy_
+sys
+tar
+tgz
+tif
+tiff
+tlb
+tmf
+ttf
+url
+uu
+vmss
+vmdk
+vmem
+vxd
+wav
+wax
+wma
+wmf
+wmv
+wpc
+wpl</textarea><br>
+</td></tr>};
+}
+else
+{
+	print '<input type=radio name=ext_choice value=everything onclick="document.profile.extensions.disabled=true"';
+	if( $old_ignore_exts eq "everything" ) { print " checked"; }
+	print ">Scan all files</input><br>\n";
+	print '<input type=radio name=ext_choice value=ignore onclick="document.profile.extensions.disabled=false"';
+	if( $old_ignore_exts eq "ignore" ) { print " checked"; }
+	print ">Scan all files except files with the following extensions</input><br>\n";
+	print '<input type=radio name=ext_choice value=allow onclick="document.profile.extensions.disabled=false"';
+	if( $old_ignore_exts eq "allow" ) { print " checked"; }
+	print ">Only scan files with the following file extensions</input><br>\n";
+
+	print "<textarea name=extensions rows=10 cols=60>$old_exts";
+	print "</textarea><br></td></tr>\n";
+}
+print "</table></div>\n";
+print "<!-- end of windows agent div part 3 // -->\n\n";
+
+print "<div id=regex>\n";
+print "<table class=sample>\n";
+print "<tr><td width=200>Regular Expressions <a href=help.html#regexes onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td>\n";
+
+print "<td width=500>";
+if( $old_found == 0 )
+{
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $string = "SELECT number,name,pattern from regexes";
+	my $sth = $dbh->prepare( $string );
+	$sth->execute();
+	while( my $results = $sth->fetchrow_arrayref() )
+	{
+		print "<input type=checkbox name=regex_" . $$results[0] . " value=1>$$results[1]</input><br>\n";
+	}
+	$sth->finish;
+	$dbh->disconnect;
+}
+else
+{
+	my @old_regexes = split( ",", $old_regex );
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $string = "SELECT number,name,pattern from regexes";
+	my $sth = $dbh->prepare( $string );
+	$sth->execute();
+	while( my $results = $sth->fetchrow_arrayref() )
+	{
+		print "<input type=checkbox name=regex_" . $$results[0] . " value=1";
+		foreach my $re( @old_regexes )
+		{
+			if( $$results[0] == $re )
+			{
+				print " checked";
+			}
+		}
+		print ">$$results[1]</input><br>\n";
+	}
+	$sth->finish;
+	$dbh->disconnect;
+}
+print "</td></tr>\n";
+
+if( $old_found == 0 )
+{
+print qq {
+<tr><td>Credit Cards <a href=help.html#ccs onclick="return popup(this, 'help')"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the names of the regex aliases)</td>
+<td><textarea name=creditcards rows=10 cols=60>Mastercard
+Visa
+AMEX
+Diners_Club_1
+Diners_Club_2
+Discover
+JCB_1
+JCB_2</textarea></td></tr>
+};
+}
+else
+{
+	print "<tr><td>Credit Cards <a href=help.html#ccs onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Newline-delimit the names of the regex aliases)</td>\n";
+	print "<td><textarea name=creditcards rows=10 cols=60>$old_creditcards</textarea></td></tr>\n";
+}
+print "</table></div>\n";
+print "<!-- end of regex div // -->\n\n";
+
+print "<div id=win_agent_options_2><table class=sample>\n";
+if( $old_found == 0 )
+{
+print qq {
+<tr><td width=200>ZIP Extensions <a href=help.html#zips onclick="return popup(this, 'help')"><img src=images/help.gif border=0></a><br><small>(Treat these extensions as ZIP files. Newline-delimit the names of file extensions.)</td>
+<td width=500><textarea name=zipfile rows=10 cols=60>zip
+jar
+xlsx
+docx
+pptx
+odt
+odp
+ods
+odg</textarea></td></tr>};
+}
+else
+{
+	print "<tr><td width=200>ZIP Extensions <a href=help.html#zips onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Treat these extensions as ZIP files. Newline-delimit the names of file extensions.)</td>\n";
+	print "<td width=500><textarea name=zipfile rows=10 cols=60>$old_zipfiles</textarea></td></tr>\n";
+}
+
+print "</table></div>\n";
+print "<!-- end of win_agent_options_2 div //-->\n";
+
+print "<div id=win_agent_options_4>\n";
+print "<table class=sample>\n";
+print "<tr><td width=200>Upload URL <a href=help.html#upload_url onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(This is the URL on your web server)</td>\n";
+
+if( $old_found == 0 )
+{
+	my $results_url = url(-query_string=>1);
+	$results_url =~ s/profiles\.html$/results\/results\.html/;
+	print "<td width=500><input name=url size=70 value=\"$results_url\"></td></tr>\n";
+}
+else
+{
+	print "<td width=500><input name=url size=70 value=\"$old_phonehomeurl\"></td></tr>\n";
+}
+
+if( $old_found == 0 )
+{
+	print "<tr><td>Upload URL username <a href=help.html#upload_user onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></font></td><td><input name=urluser size=30></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Upload URL username <a href=help.html#upload_user onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></font></td><td><input name=urluser size=30 value=\"$old_phonehomeuser\"></td></tr>\n";
+}
+
+if( $old_found == 0 )
+{
+	print "<tr><td>Upload URL password <a href=help.html#upload_pass onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></font></td><td><input name=urlpass type=password size=30></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Upload URL password <a href=help.html#upload_pass onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></font></td><td><input name=urlpass type=password size=30 value=\"$old_phonehomepass\"></td></tr>\n";
+}
+
+if( $old_found == 0 )
+{
+	print "<tr><td>Time between uploads <a href=help.html#duration onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td><input name=wait size=30 value=\"300\"></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Time between uploads <a href=help.html#duration onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td><td><input name=wait size=30 value=\"$old_delaytime\"></td></tr>\n";
+}
+
+if( $old_found == 0 )
+{
+	print "<tr><td>Description <a href=help.html#description onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(will show as Windows Service description)</td><td><input name=description size=70></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Description <a href=help.html#description onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(will show as Windows Service description)</td><td><input name=description size=70 value=\"$old_description\"></td></tr>\n";
+}
+if( $old_found == 0 )
+{
+	print "<input type=hidden name=is_new value=\"1\">\n";
+}
+else
+{
+	print "<input type=hidden name=is_new value=\"0\">\n";
+}
+
+print qq {
+</table>
+</div>
+<!-- end of win_agent_options_4 div -->
+
+<div id=submission>
+<table class=sample>};
+if( $old_found == 0 )
+{
+	print "<tr><td>Concurrent deployments <a href=help.html#concurrent onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Only for initial deployment, not running)</small></td><td><input name=concurrent size=30></td></tr>\n";
+}
+else
+{
+	print "<tr><td>Concurrent deployments <a href=help.html#concurrent onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a><br><small>(Only for initial deployment, not running)</small></td><td><input name=concurrent size=30 value=\"$old_concurrent\"></td></tr>\n";
+}
+
+if( $old_found == 0 )
+{
+print qq {
+<tr><td>Log Verbosity <a href=help.html#logs onclick="return popup(this, 'help')"><img src=images/help.gif border=0></a></td>
+<td><select name=debug>
+<option value="0">0 - Normal</option>
+<option value="1">1 - More Verbose (Not recommended for large (100+) deployments)</option>
+<option value="2">2 - Extremely Verbose (Not recommended for medium (10+) deployments)</option>
+<option value="3">3 - Intensely Verbose (Not recommended for small (3+) deployments)</option>
+</select></td></tr>};
+}
+else
+{
+	print "<tr><td>Log Verbosity <a href=help.html#logs onclick=\"return popup(this, \'help\')\"><img src=images/help.gif border=0></a></td>\n";
+	print "<td><select name=debug>\n";
+	print "<option value=\"0\"";
+	if( $old_debug == 0 ) { print " selected"; }
+	print ">0 - Normal</option>\n";
+	print "<option value=\"1\"";
+	if( $old_debug == 1 ) { print " selected"; }
+	print ">1 - More Verbose (Not recommended for large (100+) deployments)</option>\n";
+	print "<option value=\"2\"";
+	if( $old_debug == 2 ) { print " selected"; }
+	print ">2 - Extremely Verbose (Not recommended for medium (20+) deployments)</option>\n";
+	print "<option value=\"3\"";
+	if( $old_debug == 3 ) { print " selected"; }
+	print ">3 - Intensely Verbose (Not recommended for small (3+) deployments)</option>\n";
+	print "</select></td></tr>\n";
+}
+
+
+print qq {
+<tr><td width=200>Submit</td><td width=500><input type=submit value="Submit"></td></tr></table>
+</div>
+</form>
+
+
+<Br><br><br>
+};
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>
+<SCRIPT TYPE="text/javascript">
+function validate_form(thisform)
+{
+	with( thisform )
+	{
+		if( profilename.value == "" )
+		{
+			alert( "\\"Profile Name\\" cannot be blank." );
+			profilename.focus();
+			return false;
+		}
+
+		if( scantype.value != "win_agent" && scantype.value != "meta_agent" && scantype.value != "post_agent" && scantype.value != "win_agentless" && scantype.value != "win_share" && scantype.value != "unix_agentless" && scantype.value != "mssql_agentless" && scantype.value != "mysql_agentless" )
+		{
+			alert( "\\"Scan Type\\" cannot be blank." );
+			scantype.focus();
+			return false;
+		}
+
+		if( username.value == "" && scantype.value != "win_share" && scantype.value != "meta_agent" && scantype.value != "post_agent")
+		{		  
+			alert( "\\"Username\\" cannot be blank." );
+			username.focus();
+			return false;
+		}
+
+		if( domain.value == "" && (scantype.value == "win_agent" || scantype.value == "win_agentless"))
+		{
+			alert( "\\"Windows Domain/Workgroup\\" cannot be blank." );
+			domain.focus();
+			return false;
+		}
+
+		if(( scantype.value == "win_agent" || scantype.value == "meta_agent" || scantype.value == "post_agent" || scantype.value == "win_agentless" || scantype.value == "unix_agentless" || scantype.value == "win_share" ) && !(dir_choice[0].checked) )
+		{
+			var directories = document.profile.directories.value;
+			var directories_split = directories.value.split("\\n");
+			for( i = 0; i < directories_split.length; i++ )
+			{
+				if( directories_split[i] == "" )
+				{
+					alert( "Blank line detected at line " + i + " in \\"Directories\\" textarea (after the line \\"" + directories_split[i-1] + "\\"). Correct this to continue." );
+					directories.focus();
+					return false;
+				}
+			}
+		}
+
+		if(( scantype.value == "win_agent" || scantype.value == "meta_agent"  || scantype.value == "post_agent" || scantype.value == "win_agentless" || scantype.value == "unix_agentless" || scantype.value == "win_share" ) && !(ext_choice[0].checked) )
+		{
+			var extensions = document.profile.extensions.value;
+			var extensions_split = extensions.value.split("\\n");
+			for( i = 0; i < extensions_split.length; i++ )
+			{
+				if( extensions_split[i] == "" )
+				{
+					alert( "Blank line detected at line " + i + " in \\"File Extensions\\" textarea (after the line \\"" + extensions_split[i-1] + "\\"). Correct this to continue." );
+					extensions.focus();
+					return false;
+				}
+			}
+		}
+
+		if(( scantype.value == "win_agent" || scantype.value == "meta_agent" || scantype.value == "post_agent" || scantype.value == "win_agentless" || scantype.value == "unix_agentless" || scantype.value == "win_share" ) )
+		{
+			var zipfiles = zipfile.value;
+			var zipfiles_split = zipfiles.split("\\n");
+			for( i = 0; i < zipfiles_split.length; i++ )
+			{
+				if( zipfiles_split[i] == "" )
+				{
+					alert( "Blank line detected at line " + i + " in \\"ZIP Extensions\\" textarea (after the line \\"" + zipfiles_split[i-1] + "\\"). Correct this to continue." );
+					zipfile.focus();
+					return false;
+				}
+			}
+		}
+
+		if( (scantype.value == "mssql_agentless" || scantype.value == "mysql_agentless") && !(db_choice[0].checked ))
+		{
+			var databases = document.profile.databases.value;
+			var databases_split = databases.value.split("\\n");
+			for( i = 0; i < databases_split.length; i++ )
+			{
+				if( databases_split[i] == "" )
+				{
+					alert( "Blank line detected at line " + i + " in \\"Databases\\" textarea (after the line \\"" + databases_split[i-1] + "\\"). Correct this to continue." );
+					databases.focus();
+					return false;
+				}
+			}
+		}
+
+		if( (scantype.value == "mssql_agentless" || scantype.value == "mysql_agentless") && !(table_choice[0].checked ))
+		{
+			var tables = document.profile.tables.value;
+			var tables_split = tables.value.split("\\n");
+			for( i = 0; i < tables_split.length; i++ )
+			{
+				if( tables_split[i] == "" )
+				{
+					alert( "Blank line detected at line " + i + " in \\"Tables\\" textarea (after the line \\"" + tables_split[i-1] + "\\"). Correct this to continue." );
+					tables.focus();
+					return false;
+				}
+			}
+		}
+
+		if( (scantype.value == "mssql_agentless" || scantype.value == "mysql_agentless") && !(column_choice[0].checked ))
+		{
+			var columns = document.profile.columns.value;
+			var columns_split = columns.value.split("\\n");
+			for( i = 0; i < columns_split.length; i++ )
+			{
+				if( columns_split[i] == "" )
+				{
+					alert( "Blank line detected at line " + i + " in \\"Columns\\" textarea (after the line \\"" + columns_split[i-1] + "\\"). Correct this to continue." );
+					columns.focus();
+					return false;
+				}
+			}
+		}
+
+		if( (scantype.value == "mssql_agentless" || scantype.value == "mysql_agentless") && ((rows.value == "") || rows.value < 0 ))
+		{
+			alert( "Invalid entry in \\"Limit columns to X rows\\"." );
+			rows.focus();
+			return false;
+		}
+
+		var creditcards = document.profile.creditcards.value;
+		var creditcards_split = creditcards.value.split("\\n");
+		for( i = 0; i < creditcards_split.length; i++ )
+		{
+			if( creditcards_split[i] == "" )
+			{
+				alert( "Blank line detected at line " + i + " in \\"Credit Cards\\" textarea (after the line \\"" + creditcards_split[i-1] + "\\"). Correct this to continue." );
+				creditcards.focus();
+				return false;
+			}
+		}
+
+		if( (scantype.value == "win_agent" || scantype.value == "meta_agent" || scantype.value == "post_agent") && url.value == "" )
+		{
+			alert( "\\"Upload URL\\" cannot be blank." );
+			url.focus();
+			return false;
+		}
+
+		if( (scantype.value == "win_agent" || scantype.value == "meta_agent" || scantype.value == "post_agent") && urluser.value == "" )
+		{
+			alert( "\\"Upload URL username\\" cannot be blank." );
+			urluser.focus();
+			return false;
+		}
+
+		if( (scantype.value == "win_agent" || scantype.value == "meta_agent" || scantype.value == "post_agent") && urlpass.value == "" )
+		{
+			alert( "\\"Upload URL password\\" cannot be blank." );
+			urlpass.focus();
+			return false;
+		}
+
+		if( (scantype.value == "win_agent" || scantype.value == "meta_agent" || scantype.value == "post_agent") && wait.value < 1 )
+		{
+			alert( "\\"Time between uploads\\" must be at least 1." );
+			wait.focus();
+			return false;
+		}
+
+		if( concurrent.value < 1 )
+		{
+			alert( "\\"Concurrent deployments\\" must be at least 1." );
+			concurrent.focus();
+			return false;
+		}
+
+		if( password.value == "" && scantype.value != "meta_agent"  && scantype.value != "post_agent")
+		{
+			if( !confirm( "\\"Password\\" is blank. Are you sure you want this?" ))
+			{
+				password.focus();
+				return false;
+			}
+		}
+		if (scantype.value == "meta_agent" || scantype.value == "post_agent") {
+		  if (metapass.value =="") {
+		  	if( !confirm( "\\"Metasploit Password\\" is blank. Are you sure you want this?" ))	{
+			  	metapass.focus();
+				  return false;
+			  }
+			}
+			if (metauser.value == "") {
+			  alert( "\\"Metasploit user\\" cannot be blank." );
+			  metauser.focus();
+			  return false;
+			}
+			if (metahost.value == "") {
+			  alert( "\\"Metasploit host\\" cannot be blank." );
+			  metahost.focus();
+			  return false;
+			}
+			if (metaport.value == "") {
+			  alert( "\\"Metasploit port\\" cannot be blank." );
+			  metaport.focus();
+			  return false;
+			}
+			if (metapath.value == "") {
+			  alert( "\\"Path to OpenDLP files (on Metasploit system)\\" cannot be blank." );
+			  metapath.focus();
+			  return false;
+			}			  
+		
+		}
+	}
+}
+<!-- taken from http://www.htmlcodetutorial.com/linking/linking_famsupp_72.html
+function popup(mylink, windowname)
+{
+if (! window.focus)return true;
+var href;
+if (typeof(mylink) == 'string')
+   href=mylink;
+else
+   href=mylink.href;
+window.open(href, windowname, 'width=525,height=500,scrollbars=yes');
+return false;
+}
+//-->
+
+function changeList( box )
+{
+	if( box.value == "win_agent" )
+	{
+		document.getElementById("os_credentials").style.display = '';
+		document.getElementById("domain").style.display = '';
+		document.getElementById("db_options").style.display = 'none';
+		document.getElementById("smbhash").style.display = '';
+		document.getElementById("win_agent_options").style.display = '';
+		document.getElementById("memory").style.display = '';
+		document.getElementById("win_agent_options_3").style.display = '';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = '';
+		document.getElementById("win_agent_options_4").style.display = '';
+		document.getElementById("submission").style.display = '';
+		document.getElementById("meta_agent_options").style.display = 'none';
+
+		changeFS(box);
+	}
+	else if( box.value == "meta_agent" || box.value == "post_agent") 
+	{
+		document.getElementById("os_credentials").style.display = 'none';
+		document.getElementById("meta_agent_options").style.display = '';
+		document.getElementById("domain").style.display = 'none';
+		document.getElementById("db_options").style.display = 'none';
+		document.getElementById("smbhash").style.display = 'none';
+		document.getElementById("win_agent_options").style.display = '';
+		document.getElementById("memory").style.display = '';
+		document.getElementById("win_agent_options_3").style.display = '';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = '';
+		document.getElementById("win_agent_options_4").style.display = '';
+		document.getElementById("submission").style.display = '';
+		
+	  changeFS(box);
+	}
+	else if( box.value == "win_agentless" )
+	{
+		document.getElementById("os_credentials").style.display = '';
+		document.getElementById("domain").style.display = '';
+		document.getElementById("db_options").style.display = 'none';
+		document.getElementById("smbhash").style.display = '';
+		document.getElementById("win_agent_options").style.display = 'none';
+		document.getElementById("memory").style.display = '';
+		document.getElementById("win_agent_options_3").style.display = '';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = '';
+		document.getElementById("win_agent_options_4").style.display = 'none';
+		document.getElementById("submission").style.display = '';
+		document.getElementById("meta_agent_options").style.display = 'none';
+
+		changeFS(box);
+	}
+	else if( box.value == "win_share" )
+	{
+		document.getElementById("os_credentials").style.display = '';
+		document.getElementById("domain").style.display = '';
+		document.getElementById("db_options").style.display = 'none';
+		document.getElementById("smbhash").style.display = '';
+		document.getElementById("win_agent_options").style.display = 'none';
+		document.getElementById("memory").style.display = '';
+		document.getElementById("win_agent_options_3").style.display = '';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = '';
+		document.getElementById("win_agent_options_4").style.display = 'none';
+		document.getElementById("submission").style.display = '';
+		document.getElementById("meta_agent_options").style.display = 'none';
+
+		changeFS(box);
+	}
+	else if( box.value == "unix_agentless" )
+	{
+		document.getElementById("os_credentials").style.display = '';
+		document.getElementById("domain").style.display = 'none';
+		document.getElementById("db_options").style.display = 'none';
+		document.getElementById("smbhash").style.display = 'none';
+		document.getElementById("win_agent_options").style.display = 'none';
+		document.getElementById("memory").style.display = '';
+		document.getElementById("win_agent_options_3").style.display = '';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = '';
+		document.getElementById("win_agent_options_4").style.display = 'none';
+		document.getElementById("submission").style.display = '';
+		document.getElementById("meta_agent_options").style.display = 'none';
+
+		changeFS(box);
+	}
+	else if( box.value == "mssql_agentless" )
+	{
+		document.getElementById("os_credentials").style.display = '';
+		document.getElementById("domain").style.display = '';
+		document.getElementById("db_options").style.display = '';
+		document.getElementById("smbhash").style.display = 'none';
+		document.getElementById("win_agent_options").style.display = 'none';
+		document.getElementById("memory").style.display = 'none';
+		document.getElementById("win_agent_options_3").style.display = 'none';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = 'none';
+		document.getElementById("win_agent_options_4").style.display = 'none';
+		document.getElementById("submission").style.display = '';
+		document.getElementById("meta_agent_options").style.display = 'none';
+
+		changeDB(box);
+	}
+	else if( box.value == "mysql_agentless" )
+	{
+		document.getElementById("os_credentials").style.display = '';
+		document.getElementById("domain").style.display = 'none';
+		document.getElementById("db_options").style.display = '';
+		document.getElementById("smbhash").style.display = 'none';
+		document.getElementById("win_agent_options").style.display = 'none';
+		document.getElementById("memory").style.display = 'none';
+		document.getElementById("win_agent_options_3").style.display = 'none';
+		document.getElementById("regex").style.display = '';
+		document.getElementById("win_agent_options_2").style.display = 'none';
+		document.getElementById("win_agent_options_4").style.display = 'none';
+		document.getElementById("submission").style.display = '';
+		document.getElementById("meta_agent_options").style.display = 'none';
+
+		changeDB(box);
+	}
+	else
+	{
+		document.getElementById("os_credentials").style.display = 'none';
+		document.getElementById("domain").style.display = 'none';
+		document.getElementById("db_options").style.display = 'none';
+		document.getElementById("smbhash").style.display = 'none';
+		document.getElementById("win_agent_options").style.display = 'none';
+		document.getElementById("memory").style.display = 'none';
+		document.getElementById("win_agent_options_3").style.display = 'none';
+		document.getElementById("regex").style.display = 'none';
+		document.getElementById("win_agent_options_2").style.display = 'none';
+		document.getElementById("win_agent_options_4").style.display = 'none';
+		document.getElementById("submission").style.display = 'none';
+		document.getElementById("meta_agent_options").style.display = 'none';
+	}
+}
+};
+
+print "function changeDB(box)\n";
+print "{\n";
+if( $old_found == 0 )
+{
+	print qq {
+	if( box.value == "mssql_agentless" )
+	{
+		document.profile.databases.value = "master" + "\\n" + "tempdb" + "\\n" + "model" + "\\n" + "msdb" + "\\n" + "pubs" + "\\n" + "Northwind";
+		document.profile.tables.value = "syssegments" + "\\n" + "sysconstraints" + "\\n" + "dtproperties";
+		document.profile.columns.value = "";
+		document.profile.table_choice[1].checked = true;
+	}
+	else if( box.value == "mysql_agentless" )
+	{
+		document.profile.databases.value = "information_schema" + "\\n" + "mysql";
+		document.profile.tables.value = "";
+		document.profile.columns.value = "";
+		document.profile.table_choice[0].checked = true;
+	}
+
+};
+}
+print "}\n";
+
+print "function changeFS(box)\n";
+print "{\n";
+if( $old_found == 0 )
+{
+	print qq {
+	if( box.value == "win_agentless" )
+	{
+		document.profile.directories.value = "c:\\\\windows" + "\\n" + "c:\\\\winnt" + "\\n" + "c:\\\\System Volume Information";
+	}
+	else if( box.value == "unix_agentless" )
+	{
+		document.profile.directories.value = "/nfs" + "\\n" + "/bin" + "\\n" + "/usr/bin" + "\\n" + "/usr/local/bin" + "\\n" + "/lib" + "\\n" + "/usr/lib" + "\\n" + "/usr/local/lib" + "\\n" + "/sbin" + "\\n" + "/usr/sbin" + "\\n" + "/usr/local/sbin" + "\\n" + "/dev" + "\\n" + "/sys" + "\\n" + "/proc" + "\\n" + "/tmp/OpenDLP";
+		document.profile.dir_choice[0].checked = false;
+		document.profile.dir_choice[1].checked = true;
+		document.profile.dir_choice[2].checked = false;
+	}
+	else if( box.value == "win_agent" || box.value == "meta_agent" || box.value == "post_agent")
+	{
+		document.profile.directories.value = "c:\\\\windows" + "\\n" + "c:\\\\winnt" + "\\n" + "c:\\\\System Volume Information";
+		document.profile.dir_choice[0].checked = false;
+		document.profile.dir_choice[1].checked = true;
+		document.profile.dir_choice[2].checked = false;
+	}
+	else if( box.value == "win_share" )
+	{
+		document.profile.directories.value = "";
+		document.profile.dir_choice[0].checked = true;
+		document.profile.dir_choice[1].checked = false;
+		document.profile.dir_choice[2].checked = false;
+	}
+};
+}
+print "}\n";
+
+
+	print "</SCRIPT>\n";
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'profiles\');changeList(document.profile.scantype)\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

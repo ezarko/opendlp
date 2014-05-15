@@ -1,0 +1,573 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+use POSIX qw( floor );
+use MIME::Base64;
+use lib '/var/www/OpenDLP/web/bin';
+use MetaSploiter;
+use MetaPostModule;
+
+my $user = remote_user();
+
+my $is_valid = 1;
+my $MAX_LENGTH_PROFILE = 64;
+my $MAX_LENGTH_SCAN = 64;
+my $MAX_LENGTH_HOSTNAME = 64;
+
+my( $scanname, $profile, $formurl, $systems, $concurrent, $scan ) = "";
+my( $db_username, $db_password ) = "";
+my $p = "";
+my( $hostname, $results, $log, $filesscanned, $bytesscanned ) = "";
+my( $filestotal, $bytestotal, $status, $tracker ) = "";
+my $db_admin_file = "../../etc/db_admin";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if( request_method() ne "POST" )
+{
+	$is_valid = 0;
+	print "Only POST requests are allowed.<br>\n";
+}
+
+foreach $p (param())
+{
+  $form{$p} = param($p);
+	if( $p eq "hostname" )
+	{
+		$hostname = $form{$p};
+		if( length( $hostname ) > $MAX_LENGTH_HOSTNAME )
+		{
+			$is_valid = 0;
+		}
+		if( $hostname !~ /^[A-Z0-9\.\-]+$/i )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "filesscanned" )
+	{
+		$filesscanned = $form{$p};
+		if( $filesscanned !~ /^[0-9]+$/ )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "bytesscanned" )
+	{
+		$bytesscanned = $form{$p};
+		if( $bytesscanned !~ /^[0-9]+$/ )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "results" )
+	{
+		$results = $form{$p};
+	}
+	if( $p eq "log" )
+	{
+		$log = $form{$p};
+	}
+	if( $p eq "bytestotal" )
+	{
+		$bytestotal = $form{$p};
+		if( $bytestotal !~ /^[0-9]+$/ )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "filestotal" )
+	{
+		$filestotal = $form{$p};
+		if( $filestotal !~ /^[0-9]+$/ )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "status" )
+	{
+		$status = $form{$p};
+		if( $status !~ /^(0|1|2|3)$/ )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "tracker" )
+	{
+		$tracker = $form{$p};
+		if( $tracker !~ /[A-F0-9]{32}/i )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "scan" )
+	{
+		$scan = $form{$p};
+		if( length( $scan ) > $MAX_LENGTH_SCAN )
+		{
+			$is_valid = 0;
+		}
+		if( $scan !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+		{
+			$is_valid = 0;
+		}
+	}
+	if( $p eq "profile" )
+	{
+		$profile = $form{$p};
+		if( $profile !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+		{
+			$is_valid = 0;
+		}
+		if( length( $profile ) > $MAX_LENGTH_PROFILE )
+		{
+			$is_valid = 0;
+		}
+	}
+}
+
+if( $is_valid )
+{
+	my $logstring = "";
+	foreach $p (param())
+	{
+		$form{$p} = param($p);
+		$logstring .= "$p\=$form{$p}\&";
+	}
+#	open( LOG, ">>/tmp/log.txt" );
+#	print LOG "$logstring\n";
+#	close( LOG );
+
+	if( $status eq "2" )
+	{
+		my $localtime = time();
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+		# update systems
+		my $string = "UPDATE systems SET system=?,status=?,updated=?,filesdone=?,bytesdone=? WHERE tracker=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $hostname, '2', $localtime, $filesscanned, $bytesscanned, $tracker );
+
+		# update results
+		while( my $line = <$results> )
+		{
+			$line =~ s/\r$//g;
+			$line =~ s/\n$//g;
+
+			my( $filename, $regex_name, $result, $offset, $md5, $zipfile ) = split( "\t", $line );
+			if( $zipfile ne "" )
+			{
+				$filename .= ":" . $zipfile;
+			}
+
+			my $string = "SELECT mask from profiles where profile=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $profile );
+			my $db_result = $sth->fetchrow_arrayref();
+			my $mask = $$db_result[0];
+
+			if( $$db_result[0] == 1 )
+			{
+				$result = filterme( $result );
+			}
+			my $string = "INSERT INTO results SET scan=?,system=?,type=?,pattern=?,file=?,offset=?,md5=?,tracker=?,is_false=\"0\"";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $scan,$hostname,$regex_name,$result,$filename,$offset,$md5,$tracker );
+		}
+
+		# update log
+		my $line_counter = 0;
+		while( my $line = <$log> )
+		{
+			$line =~ s/\r$//g;
+			$line =~ s/\n$//g;
+
+			chomp $line;
+			my $string = "INSERT INTO logs SET tracker=?,line=?,data=?,updated=?,scan=?,profile=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $tracker, $line_counter, $line, $localtime, $scan, $profile );
+			$line_counter++;
+		}
+
+		$sth->finish();
+		$dbh->disconnect();
+	}
+
+	elsif( $status eq "1" )
+	{
+		my $localtime = time();
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+		# update systems
+		my $string = "UPDATE systems SET system=?,status=?,updated=?,filestotal=?,bytestotal=? WHERE tracker=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $hostname, '1', $localtime, $filestotal, $bytestotal, $tracker );
+
+		# update logs
+		my $line_counter = 0;
+		while( my $line = <$log> )
+		{
+			$line =~ s/\r$//g;
+			$line =~ s/\n$//g;
+
+			chomp $line;
+			my $string = "INSERT INTO logs SET tracker=?,line=?,data=?,updated=?,scan=?,profile=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $tracker, $line_counter, $line, $localtime, $scan, $profile );
+			$line_counter++;
+		}
+
+		$sth->finish();
+		$dbh->disconnect();
+	}
+
+	elsif( $status eq "0" )
+	{
+		my $localtime = time();
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+		# update systems
+		my $string = "UPDATE systems SET system=?,status=?,updated=? WHERE tracker=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $hostname, '0', $localtime, $tracker );
+
+		# update logs
+		my $line_counter = 0;
+		while( my $line = <$log> )
+		{
+			$line =~ s/\r$//g;
+			$line =~ s/\n$//g;
+
+			my $string = "INSERT INTO logs SET tracker=?,line=?,data=?,updated=?,scan=?,profile=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $tracker, $line_counter, $line, $localtime, $scan, $profile );
+			$line_counter++;
+		}
+
+		$sth->finish();
+		$dbh->disconnect();
+	}
+	elsif( $status eq "3" )
+	{
+		my $localtime = time();
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+		# update systems
+		my $string = "UPDATE systems SET system=?,status=?,updated=?,filesdone=?,bytesdone=?,control=? WHERE tracker=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $hostname, '3', $localtime, $filesscanned, $bytesscanned, 'finished', $tracker );
+
+		# update results
+		while( my $line = <$results> )
+		{
+			$line =~ s/\r$//g;
+			$line =~ s/\n$//g;
+
+			my( $filename, $regex_name, $result, $offset, $md5, $zipfile ) = split( "\t", $line );
+			if( $zipfile ne "" )
+			{
+				$filename .= ":" . $zipfile;
+			}
+
+			my $string = "SELECT mask from profiles where profile=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $profile );
+			my $db_result = $sth->fetchrow_arrayref();
+			my $mask = $$db_result[0];
+
+			if( $$db_result[0] == 1 )
+			{
+				$result = filterme( $result );
+			}
+
+
+			my $string = "INSERT INTO results SET scan=?,system=?,type=?,pattern=?,file=?,offset=?,md5=?,tracker=?,is_false=\"0\"";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $scan,$hostname,$regex_name,$result,$filename,$offset,$md5,$tracker );
+		}
+
+		# update logs
+		my $line_counter = 0;
+		while( my $line = <$log> )
+		{
+			$line =~ s/\r$//g;
+			$line =~ s/\n$//g;
+
+			my $string = "INSERT INTO logs SET tracker=?,line=?,data=?,updated=?,scan=?,profile=?";
+			$sth = $dbh->prepare( $string );
+			$sth->execute( $tracker, $line_counter, $line, $localtime, $scan, $profile );
+			$line_counter++;
+		}
+
+
+		# get OS credentials
+		my $string = "SELECT username,password,domain,path,hash,scantype,metahost,metaport,metauser,metapass,metalatency,metatimeout,metassl from profiles where profile=?";
+		
+
+		$sth = $dbh->prepare( $string );
+		$sth->execute( $profile );
+		my $results = $sth->fetchrow_arrayref();
+
+		my $username = $$results[0];
+		my $password = $$results[1];
+		my $domain   = $$results[2];
+		my $path     = $$results[3];
+		my $scantype = $$results[5];
+		my $metahost = $$results[6];
+		my $metaport = $$results[7];
+		my $metauser = $$results[8];
+		my $metapass = $$results[9];
+		my $metalatency = $$results[10];
+		my $metatimeout = $$results[11];
+		my $metassl     = $$results[12];
+		
+		if ($scantype eq "post_agent") {
+		
+#open(LOG, ">>/tmp/log16.txt" );
+#LOG->autoflush(1);
+
+		  #get the metasploit sessionid for the target
+		  my $string = "SELECT sessionid, ip from systems where tracker=?";
+      $sth = $dbh->prepare( $string );
+      $sth->execute( $tracker );
+      my $results = $sth->fetchrow_arrayref();
+      my $sessionId = $$results[0];
+      my $ip = $$results[1];
+      
+      my $metaPostModule = MetaPostModule->new();	
+      $metaPostModule->SetLatency($metalatency);      
+  		if ($metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) { goto DONE; }
+      if ($metaPostModule->AcquirePersistentToken() ) { goto DONE; }
+
+      # Check if the session id and the ip address match before attempting to stop the service.
+      $metaPostModule->ListSessions();
+      my @sessionList = $metaPostModule->GetSessionList();
+  
+      my $foundHost = "";        
+      foreach my $session(@sessionList) {  
+      my $temp =  "sessionName=" . $session->sessionName . "\n";                    
+        if ($session->sessionName eq $sessionId) {                   
+          $foundHost = getIpFromPeer($session->tunnel_peer);
+          last;          
+        }            
+      }
+      if ($foundHost ne $ip) { 
+#print LOG "WARNING: Session id and IP address do not match. Expected $ip, received $foundHost.\n";#Aborting.\n";
+        #goto DONE;
+      }
+      $metaPostModule->SetModuleName("windows/gather/opendlp"); 
+      $metaPostModule->SetRemotePath($path);
+      $metaPostModule->SetSessionId($sessionId);      
+      $metaPostModule->DeleteOpenDLP();
+      sleep(5);
+      $metaPostModule->RemoveRemotePath();
+      $metaPostModule->ReleasePersistentToken();
+  	}
+
+		elsif ($scantype eq "meta_agent") {
+
+#open(LOG, ">>/tmp/log10.txt" );
+#LOG->autoflush(1);
+#print LOG "profile : $profile\n";
+#print LOG "scantype: $scantype\n";
+#print LOG "metahost: $metahost\n";	  
+#print LOG "metaport: $metaport\n";
+#print LOG "metauser: $metauser\n";
+#print LOG "metapass: $metapass\n";
+#print LOG "latency : $metalatency\n";
+#print LOG "timeout : $metatimeout\n";
+#print LOG "path    : $path\n";
+
+
+		  #get the metasploit sessionid for the target
+		  my $string = "SELECT sessionid, ip from systems where tracker=?";
+      $sth = $dbh->prepare( $string );
+      $sth->execute( $tracker );
+      my $results = $sth->fetchrow_arrayref();
+      my $sessionId = $$results[0];
+      my $ip = $$results[1];
+      
+#print LOG "SessionId: $sessionId\n";
+      
+      my $metaSploiter = MetaSploiter->new();	
+      $metaSploiter->SetLatency($metalatency);
+  		# For errors, nothing we can really do, this is called by the opendlp service to delete 
+			# itself, so everything will just exit gracefully if there's an error.		  
+		  if ($metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) { goto DONE; }
+#print LOG "Logged in.\n";
+      if ($metaSploiter->AcquirePersistentToken() ) { goto DONE; }
+
+      # Check if the session id and the ip address match before attempting to stop the service.
+      $metaSploiter->ListSessions();
+      my @sessionList = $metaSploiter->GetSessionList();
+  
+      my $foundHost = "";        
+      foreach my $session(@sessionList) {                       
+        if ($session->sessionName eq $sessionId) { 
+          $foundHost = getIpFromPeer($session->tunnel_peer);            
+          last;          
+        }            
+      }
+      if ($foundHost ne $ip) { 
+#print LOG "Session id and IP address do not match. Aborting.\n";
+#        goto DONE;
+      }
+
+      $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+#print LOG "Changing remote path to '/'\n";
+      my $ret_code = $metaSploiter->ChangeRemotePath($sessionId, "/");
+#print LOG "ret_code= $ret_code\n";
+      if ($ret_code) { goto DONE; }
+ 
+      $path =~ s/\\/\//g;
+#print LOG "path to executable: $path/sc.exe\n";
+#print LOG "Stop OpenDLP.\n";
+      $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "stop", "OpenDLP");
+      sleep(5);
+#print LOG $metaSploiter->GetCommandResponse() . "\n";
+#print LOG "delete OpenDLP\n";
+      $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+      $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "delete", "OpenDLP");      
+#print LOG $metaSploiter->GetCommandResponse() . "\n";
+      sleep(5);
+#print LOG "Execute remove.bat\n";     
+      $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+      $metaSploiter->RemoteExecute($sessionId, "\"$path/remove.bat\"");
+      sleep(3);
+      $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+      $metaSploiter->SendAndWait($sessionId, "rmdir \"$path\"");      
+#print LOG "\n\n";
+#close(LOG);
+      $metaSploiter->ReleasePersistentToken();
+
+		} elsif ($scantype eq "win_agent") {
+      
+      # If smbhash is not blank, set the environment variable SMBHASH
+      # to hold the value that will be passed to the host
+      if($$results[4] ne "")
+      {
+        $ENV{'SMBHASH'} = $$results[4];
+      }
+
+      # get IP address of system
+      my $string = "SELECT ip from systems where tracker=?";
+      $sth = $dbh->prepare( $string );
+      $sth->execute( $tracker );
+      my $results = $sth->fetchrow_arrayref();
+      my $system = $$results[0];
+
+      my $escape_user = "";
+      my $length_user = length( $username );
+      my $x = 0;
+      for( $x = 0; $x < $length_user; $x++ )
+      {
+        $escape_user .= "\\" . substr( $username, $x, 1 );
+      }
+
+      my $escape_pass = "";
+      my $length_pass = length( $password );
+      my $x = 0;
+      for( $x = 0; $x < $length_pass; $x++ )
+      {
+        $escape_pass .= "\\" . substr( $password, $x, 1 );
+      }
+
+      sleep(5);
+
+      # stop service
+      my $command = "winexe --user=\'$domain\'\\$escape_user --password=$escape_pass //$system \'\"$path\\sc.exe\" stop OpenDLP\'";
+      `$command`;
+
+      # give Windows a few seconds to recover
+      sleep(5);
+
+      # delete service
+      my $command = "winexe --user=\'$domain\'\\$escape_user --password=$escape_pass //$system \'\"$path\\sc.exe\" delete OpenDLP\'";
+      `$command`;
+
+      # give Windows a few seconds to stop the service and become sane again
+      sleep(10);
+
+      # "rm -rf" OpenDLP installation directory
+      my $command = "winexe --user=\'$domain\'\\$escape_user --password=$escape_pass //$system \'cmd.exe /c rd \"$path\" /Q /S\'";
+      `$command`;
+
+    }
+    DONE:
+    $sth->finish();
+    $dbh->disconnect();
+	}
+}
+
+footer();
+
+sub filterme
+{
+	my $text = shift;
+	my $filtered = "";
+
+	for( my $x = 0; $x < length( $text ); $x++ )
+	{
+		my $char = substr( $text, $x, 1 );
+		if( $x <= (floor( length( $text ) * .75)) )
+		{
+			$filtered .= "X";
+		}
+		elsif( $char !~ /[0-9A-Z\~\`\!\@\#\$\%\^\&\*\(\)\_\-\=\+\[\{\]\}\\\|\;\:\'\"\,\<\.\>\/\?\ ]/i )
+		{
+			$filtered .= "?";
+		}
+		else
+		{
+			$filtered .= $char;
+		}
+	}
+	return $filtered;
+}
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP 0.2</title></head>\n";
+	print "<BODY>\n";
+}
+
+sub footer
+{
+	print "</body></html>\n";
+}
+
+sub getIpFromPeer 
+{
+
+  my $peer = shift;
+  my $pos = index($peer, ":");
+  if ($pos == -1) { return $peer; }
+  else { return substr($peer, 0, $pos); }
+}

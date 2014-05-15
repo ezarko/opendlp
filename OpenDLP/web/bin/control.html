@@ -1,0 +1,1720 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+use POSIX ":sys_wait_h";
+use Proc::Queue;
+use File::Path qw (remove_tree);
+use MetaSploiter;
+use MetaPostModule;
+
+my $version = get_version();
+my $db_admin_file = "../etc/db_admin";
+my $is_valid = 1;
+my $scantype = "";
+my %profile_info = ();
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+my ($db_username, $db_password) = split( ":", $db_line );
+header();
+
+my $query = CGI->new;
+my $action = $query->param('action');
+if( $action !~ /^(pause|resume|uninstall)$/i )
+{
+	$is_valid = 0;
+	print "Invalid action: Must be \"pause\", \"resume\", or \"uninstall\".<br><br>\n";
+}
+
+my $scanname = $query->param('scanname');
+if( $scanname ne "" && $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+{
+	$is_valid = 0;
+	print "Invalid scan name<br><br>\n";
+}
+
+my $tracker = $query->param('system');
+if( $tracker ne "" && $tracker !~ /^[A-Z0-9]{32}$/ )
+{
+	$is_valid = 0;
+	print "Invalid system tracker<br><br>\n";
+}
+
+if( $is_valid )
+{
+  
+	# get scan type
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $string = "SELECT scantype FROM systems WHERE scan=?";
+	my $sth = $dbh->prepare( $string );
+	$sth->execute( $scanname );
+	my $results = $sth->fetchrow_arrayref();
+	$scantype = $$results[0];
+
+  if ($scantype eq "meta_agent" || $scantype eq "post_agent") {
+  
+    if ($action eq "pause") { 
+      print "<heading>Pause Agents</heading><br><br>\n";
+      # if no arguments are given
+      if ($tracker eq "" && $scanname eq "")  {
+        print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+      }
+      elsif ($scanname ne "" && $tracker eq "")   {
+        print "Attempting to pause agents...<br>\n";
+        get_profile();
+
+        # get all systems in "running" state
+        my @sessions = ();
+        my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND control=\"running\"";
+        my $sth = $dbh->prepare($string);
+        $sth->execute($scanname);
+        while (my $results = $sth->fetchrow_arrayref()) { push @sessions, $$results[0]; }
+
+        my $num_of_sessions = @sessions;
+        if ($num_of_sessions == 0) { print "No agents are running, so nothing will be paused.<br><br>\n";   }
+        else  {
+          Proc::Queue::size($profile_info{concurrent});
+          foreach my $sessionid (@sessions)  {
+            $num_of_sessions--;
+           
+            my $f = fork;
+            if (defined ($f) and $f == 0) {
+              print "Trying to pause agent on session $sessionid ($num_of_sessions systems remain in queue)<br>\n";
+                            
+              # stop OpenDLP
+              my $ret_code = MetaStopOpenDLP($profile_info, $sessionid, $scantype);
+              
+              if ($ret_code == 0)  {
+                print "Session $sessionid: OpenDLP paused<br>\n";
+
+                # update "control" in "systems" table
+                my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND sessionid=?";
+                $sth = $dbh->prepare($string);
+                $sth->execute($scanname, $sessionid);
+              } else {
+                print "Session $sessionid: Got unexpected response from command. The agent may be paused. Check the previous screen to verify.<br>\n";
+              }              
+              exit(0);
+            }
+            1 while waitpid(-1, WNOHANG) > 0;
+          } # foreach my $sessionid (@sessions)  {
+        } # num_of_sessions != 0
+        
+        $sth->finish();
+        $dbh->disconnect();
+      }
+
+      # pause specific system
+      elsif ($scanname ne "" && $tracker ne "") {
+        get_profile();
+
+        # get system's session id
+        my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND control=\"running\" AND tracker=?";
+        my $sth = $dbh->prepare($string);
+        $sth->execute($scanname, $tracker);
+        my $results = $sth->fetchrow_arrayref();
+        my $sessionid = $$results[0];
+
+        if ($sessionid eq "") {  print "Agent is not running, so nothing will be paused.<br><br>\n"; }
+        else {
+          print "Session $sessionid: Attempting to pause agent...<br>\n";
+          
+          # stop OpenDLP
+          my $ret_code = MetaStopOpenDLP($profile_info, $sessionid, $scantype);
+      
+          if ($ret_code == 0) {
+            print "Session $sessionid: OpenDLP paused<br>\n";
+
+            # update "control" in "systems" table
+            my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND sessionid=?";
+            $sth = $dbh->prepare($string);
+            $sth->execute($scanname, $sessionid);
+          }
+          else {
+            print "Session $sessionid: Got unexpected response from command. The agent may be paused. Check the previous screen to verify.<br>\n";
+          }
+        }
+
+        $sth->finish();
+        $dbh->disconnect();
+      } # pause specific system
+    } # if ($action eq "pause") { 
+    
+    elsif ($action eq "resume") { # meta_agent
+    
+      print "<heading>Resume Agents</heading><br><br>\n";
+
+      # if no arguments are given
+      if ($tracker eq "" && $scanname eq "") { print "No action will be taken: You must at least specify a scan name.<br><br>\n"; }
+
+      #resume list of agents
+      elsif ($scanname ne "" && $tracker eq "")   {
+        print "Attempting to resume agents...<br>\n";
+        get_profile();
+
+        # get all systems in "stopped" state
+        my @sessions = ();
+        my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND control=\"stopped\"";
+        my $sth = $dbh->prepare($string);
+        $sth->execute($scanname);
+        while (my $results = $sth->fetchrow_arrayref()) { push @sessions, $$results[0];  }
+
+        my $num_of_sessions = @sessions;
+        if ($num_of_sessions == 0) { print "No agents are paused, so nothing will be resumed.<br><br>\n";  }
+        else  {
+          Proc::Queue::size($profile_info{concurrent});
+          foreach my $sessionid(@sessions) {
+            $num_of_sessions--;
+
+            my $f = fork;
+            if (defined ($f) and $f == 0)   {
+              print "Trying to resume agent on session $sessionid ($num_of_sessions systems remain in queue)<br>\n";
+
+              # resume OpenDLP
+              my $ret_code = MetaStartOpenDLP($profile_info, $sessionid, $scantype);
+              
+              if ($ret_code == 0)  {
+                print "Session $sessionid: OpenDLP resumed<br>\n";
+
+                # update "control" in "systems" table
+                my $string = "UPDATE systems SET control=\"running\" WHERE scan=? AND sessionid=?";
+                $sth = $dbh->prepare($string);
+                $sth->execute($scanname, $sessionid);
+              }
+              else {
+                print "Session $sessionid: Got unexpected response from command. The agent may be resumed. Check the previous screen to verify.<br>\n";
+              }
+
+              exit(0);
+            }
+            1 while waitpid(-1, WNOHANG) > 0;
+          }
+        }
+
+        $sth->finish();
+        $dbh->disconnect();
+      } #resume list of agents
+
+      # resume specific system
+      elsif ($scanname ne "" && $tracker ne "")   {
+        get_profile();
+
+        # get session ids
+        my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND control=\"stopped\" AND tracker=?";
+        my $sth = $dbh->prepare($string);
+        $sth->execute($scanname, $tracker);
+        my $results = $sth->fetchrow_arrayref();
+        my $sessionid = $$results[0];
+
+        if ($sessionid eq "") { print "Agent is not running, so nothing will be paused.<br><br>\n"; }
+        else {
+          print "Session $sessionid: Attempting to resume agent...<br>\n";
+ 
+          # resume OpenDLP
+          my $ret_code = MetaStartOpenDLP($profile_info, $sessionid, $scantype);
+
+          if ($ret_code == 0)  {
+            print "Session $sessionid: OpenDLP resumed<br>\n";
+            
+            # update "control" in "systems" table
+            my $string = "UPDATE systems SET control=\"running\" WHERE scan=? AND sessionid=?";
+            $sth = $dbh->prepare($string);
+            $sth->execute($scanname, $sessionid);
+          }
+          else  {
+            print "Session $sessionid: Got unexpected response from command. The agent may be resumed. Check the previous screen to verify.<br>\n";
+          }
+        }
+
+        $sth->finish();
+        $dbh->disconnect();
+      } # resume specific system
+      
+    } # elsif ($action eq "resume") {
+    
+    elsif ($action eq "uninstall") {   #meta_agent
+    print "<heading>Uninstall Agents</heading><br><br>\n";
+
+      # if no arguments are given
+      if ($tracker eq "" && $scanname eq "") {
+        print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+      }
+
+      elsif ($scanname ne "" && $tracker eq "") {
+        print "Attempting to stop and uninstall agents...<br>\n";
+        get_profile();
+
+        # get all sessions in "running" state
+        my @sessions = ();
+        my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND control=\"running\"";
+        my $sth = $dbh->prepare($string);
+        $sth->execute($scanname);
+        while (my $results = $sth->fetchrow_arrayref()) { push @sessions, $$results[0]; }
+
+        # get all sessions in "stopped" state
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND control=\"stopped\"";
+        $sth = $dbh->prepare($string);
+        $sth->execute($scanname);        
+        while (my $results = $sth->fetchrow_arrayref() && length($results)) { push @sessions, $$results[0]; }
+
+        # remove undefined (empty) elements
+        @sessions = grep { defined } @sessions;
+        
+        # uniq @systems
+        my %seen = ();
+        @sessions = grep {! $seen{$_}++} @sessions;
+     
+        my $num_of_sessions = @sessions;
+        print "num of sessions: $num_of_sessions<br>\n";
+        print "session: '". $sessions[0] . "'<br>\n";
+        if ($num_of_sessions == 0) {
+          print "No agents are running or paused, so nothing will be stopped and uninstalled.<br><br>\n";
+        } else   {
+          Proc::Queue::size($profile_info{concurrent});
+          foreach my $sessionid (@sessions) {
+            $num_of_sessions--;
+
+            my $f = fork;
+            if (defined ($f) and $f == 0) {
+              print "Trying to stop and uninstall agent on session $sessionid ($num_of_sessions systems remain in queue)<br>\n";            
+
+              # stop OpenDLP
+              my $ret_code = MetaStopOpenDLP($profile_info, $sessionid, $scantype);
+
+              if ($ret_code == 0) {
+                print "Session $sessionid: OpenDLP stopped<br>\n";
+
+                # update "control" in "systems" table
+                my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND sessionid=?";
+                $sth = $dbh->prepare($string);
+                $sth->execute($scanname, $sessionid);
+              } elsif ($ret_code == 1) { 
+                print "Session $sessionid: OpenDLP already stopped<br>\n"; 
+              } else { 
+                print "Session $sessionid: Got unexpected response from command. The agent may be stopped. Check the previous screen to verify.<br>\n";
+              }
+
+              # give Windows a few seconds to clean up and become sane
+              sleep(10);
+              
+              # if we get a -1, that means critical error occurred. 1 means unknown response received, but
+              # we did try and it will probably work.
+              if (MetaDeleteOpenDLP($profile_info, $sessionid, $scantype) == -1) {
+                print "Session $sessionid: Error deleting OpenDLP service. OpenDLP was probably not uninstalled.<br>\n";
+                exit(0); # don't update the database in this case, or we won't be able to try again.
+              }
+              
+              # update "control" in "systems" table
+              my $string = "UPDATE systems SET control=\"uninstalled\" WHERE scan=? AND sessionid=?";
+              $sth = $dbh->prepare($string);
+              $sth->execute($scanname, $sessionid);
+
+              print "Session $sessionid: OpenDLP stopped and uninstalled<br>\n";
+
+              exit(0);
+            }
+            1 while waitpid(-1, WNOHANG) > 0;
+          }
+        }
+
+        $sth->finish();
+        $dbh->disconnect();
+      }
+
+      # uninstall specific system
+      elsif ($scanname ne "" && $tracker ne "") {
+        get_profile();
+
+        # get system's IP
+        my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+        my $string = "SELECT sessionid FROM systems WHERE scan=? AND tracker=? AND (control=\"stopped\" or control=\"running\")";
+        my $sth = $dbh->prepare($string);
+        $sth->execute($scanname, $tracker);
+        my $results = $sth->fetchrow_arrayref();
+        my $sessionid = $$results[0];
+
+        if ($sessionid eq "") {
+          print "Agent is not running or paused, so nothing will be stopped and uninstalled.<br><br>\n";
+        } else {
+          print "Session $sessionid: Attempting to stop and uninstall agent...<br>\n";
+
+          # stop OpenDLP
+          my $ret_code = MetaStopOpenDLP($profile_info, $sessionid, $scantype);
+
+          if ($ret_code == 0) {
+            print "Session $sessionid: OpenDLP stopped<br>\n";
+
+            # update "control" in "systems" table
+            my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND sessionid=?";
+            $sth = $dbh->prepare($string);
+            $sth->execute($scanname, $sessionid);
+          } elsif ($ret_code == 1) { 
+            print "Session $sessionid: OpenDLP already stopped<br>\n"; 
+          } else { 
+            print "Session $sessionid: Got unexpected response from command. The agent may be stopped. Check the previous screen to verify.<br>\n";
+          }
+
+          # give Windows a few seconds to clean up and become sane
+          sleep(10);
+
+          # if we get a -1, that means critical error occurred. 1 means unknown response received, but
+          # we did try and it will probably work.
+          if (MetaDeleteOpenDLP($profile_info, $sessionid, $scantype) == -1) {
+            print "Session $sessionid: Error deleting OpenDLP service. OpenDLP was probably not uninstalled.<br>\n";
+            exit(0); # don't update the database in this case, or we won't be able to try again.
+          }
+              
+          # update "control" in "systems" table
+          my $string = "UPDATE systems SET control=\"uninstalled\" WHERE scan=? AND sessionid=?";
+          $sth = $dbh->prepare($string);
+          $sth->execute($scanname, $sessionid);
+
+          print "Session $sessionid: OpenDLP stopped and uninstalled<br>\n";
+        }
+
+        $sth->finish();
+        $dbh->disconnect();
+      }
+    } # elsif ($action eq "uninstall")       
+  } # if ($scantype eq "meta_agent")
+	elsif( $scantype eq "win_agent" )
+	{
+		if( $action eq "pause" )
+		{
+			print "<heading>Pause Agents</heading><br><br>\n";
+
+			# if no arguments are given
+			if( $tracker eq "" && $scanname eq "" )
+			{
+				print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+			}
+
+			elsif( $scanname ne "" && $tracker eq "" )
+			{
+				print "Attempting to pause agents...<br>\n";
+				get_profile();
+
+				# get all systems in "running" state
+				my @systems = ();
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT ip FROM systems WHERE scan=? AND control=\"running\"";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @systems, $$results[0];
+				}
+
+				my $length_of_systems = @systems;
+				if( $length_of_systems == 0 )
+				{
+					print "No agents are running, so nothing will be paused.<br><br>\n";
+				}
+				else
+				{
+					Proc::Queue::size( $profile_info{concurrent} );
+					foreach my $ip( @systems )
+					{
+						$length_of_systems--;
+
+						my $f = fork;
+						if( defined ($f) and $f == 0 )
+						{
+							print "Trying to pause agent on $ip ($length_of_systems systems remain in queue)<br>\n";
+
+							my $escape_user = "";
+							my $length_user = length( $profile_info{username} );
+							my $x = 0;
+							for( $x = 0; $x < $length_user; $x++ )
+							{
+								$escape_user .= "\\" . substr( $profile_info{username}, $x, 1 );
+							}
+
+							my $escape_pass = "";
+							my $length_pass = length( $profile_info{password} );
+							my $x = 0;
+							for( $x = 0; $x < $length_pass; $x++ )
+							{
+								$escape_pass .= "\\" . substr( $profile_info{password}, $x, 1 );
+							}
+
+							# stop OpenDLP
+							my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" stop OpenDLP\'";
+							my $output = `$command`;
+							my $is_successful = 0;
+							if( $output =~ /(STOP_PENDING|STOPPED)/ )
+							{
+								$is_successful = 1;
+							}
+
+							if( $is_successful )
+							{
+								print "$ip: OpenDLP paused<br>\n";
+
+								# update "control" in "systems" table
+								my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND ip=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname, $ip );
+							}
+							else
+							{
+								print "$ip: Got unexpected response from command. The agent may be paused. Check the previous screen to verify.<br>\n";
+							}
+
+							exit(0);
+						}
+						1 while waitpid(-1, WNOHANG) > 0;
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+
+			# pause specific system
+			elsif( $scanname ne "" && $tracker ne "" )
+			{
+				get_profile();
+
+				# get system's IP
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT ip FROM systems WHERE scan=? AND control=\"running\" AND tracker=?";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname, $tracker );
+				my $results = $sth->fetchrow_arrayref();
+				my $ip = $$results[0];
+
+				if( $ip eq "" )
+				{
+					print "Agent is not running, so nothing will be paused.<br><br>\n";
+				}
+				else
+				{
+					print "$ip: Attempting to pause agent...<br>\n";
+
+					my $escape_user = "";
+					my $length_user = length( $profile_info{username} );
+					my $x = 0;
+					for( $x = 0; $x < $length_user; $x++ )
+					{
+						$escape_user .= "\\" . substr( $profile_info{username}, $x, 1 );
+					}
+
+					my $escape_pass = "";
+					my $length_pass = length( $profile_info{password} );
+					my $x = 0;
+					for( $x = 0; $x < $length_pass; $x++ )
+					{
+						$escape_pass .= "\\" . substr( $profile_info{password}, $x, 1 );
+					}
+
+					# stop OpenDLP
+					my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" stop OpenDLP\'";
+					my $output = `$command`;
+					my $is_successful = 0;
+					if( $output =~ /(STOP_PENDING|STOPPED)/ )
+					{
+						$is_successful = 1;
+					}
+
+					if( $is_successful )
+					{
+						print "$ip: OpenDLP paused<br>\n";
+
+						# update "control" in "systems" table
+						my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND ip=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $ip );
+					}
+					else
+					{
+						print "$ip: Got unexpected response from command. The agent may be paused. Check the previous screen to verify.<br>\n";
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+		}
+
+		elsif( $action eq "resume" )
+		{
+			print "<heading>Resume Agents</heading><br><br>\n";
+
+			# if no arguments are given
+			if( $tracker eq "" && $scanname eq "" )
+			{
+				print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+			}
+
+			elsif( $scanname ne "" && $tracker eq "" )
+			{
+				print "Attempting to resume agents...<br>\n";
+				get_profile();
+
+				# get all systems in "stopped" state
+				my @systems = ();
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT ip FROM systems WHERE scan=? AND control=\"stopped\"";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @systems, $$results[0];
+				}
+
+				my $length_of_systems = @systems;
+				if( $length_of_systems == 0 )
+				{
+					print "No agents are paused, so nothing will be resumed.<br><br>\n";
+				}
+				else
+				{
+					Proc::Queue::size( $profile_info{concurrent} );
+					foreach my $ip( @systems )
+					{
+						$length_of_systems--;
+
+						my $f = fork;
+						if( defined ($f) and $f == 0 )
+						{
+							print "Trying to resume agent on $ip ($length_of_systems systems remain in queue)<br>\n";
+
+							my $escape_user = "";
+							my $length_user = length( $profile_info{username} );
+							my $x = 0;
+							for( $x = 0; $x < $length_user; $x++ )
+							{
+								$escape_user .= "\\" . substr( $profile_info{username}, $x, 1 );
+							}
+
+							my $escape_pass = "";
+							my $length_pass = length( $profile_info{password} );
+							my $x = 0;
+							for( $x = 0; $x < $length_pass; $x++ )
+							{
+								$escape_pass .= "\\" . substr( $profile_info{password}, $x, 1 );
+							}
+
+							# start OpenDLP
+							my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" start OpenDLP\'";
+							my $output = `$command`;
+							my $is_successful = 0;
+							if( $output =~ /(START_PENDING|RUNNING)/ )
+							{
+								$is_successful = 1;
+							}
+
+							if( $is_successful )
+							{
+								print "$ip: OpenDLP resumed<br>\n";
+
+								# update "control" in "systems" table
+								my $string = "UPDATE systems SET control=\"running\" WHERE scan=? AND ip=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname, $ip );
+							}
+							else
+							{
+								print "$ip: Got unexpected response from command. The agent may be resumed. Check the previous screen to verify.<br>\n";
+							}
+
+							exit(0);
+						}
+						1 while waitpid(-1, WNOHANG) > 0;
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+
+			# resume specific system
+			elsif( $scanname ne "" && $tracker ne "" )
+			{
+				get_profile();
+
+				# get system's IP
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT ip FROM systems WHERE scan=? AND control=\"stopped\" AND tracker=?";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname, $tracker );
+				my $results = $sth->fetchrow_arrayref();
+				my $ip = $$results[0];
+
+				if( $ip eq "" )
+				{
+					print "Agent is not running, so nothing will be paused.<br><br>\n";
+				}
+				else
+				{
+					print "$ip: Attempting to resume agent...<br>\n";
+
+					my $escape_user = "";
+					my $length_user = length( $profile_info{username} );
+					my $x = 0;
+					for( $x = 0; $x < $length_user; $x++ )
+					{
+						$escape_user .= "\\" . substr( $profile_info{username}, $x, 1 );
+					}
+
+					my $escape_pass = "";
+					my $length_pass = length( $profile_info{password} );
+					my $x = 0;
+					for( $x = 0; $x < $length_pass; $x++ )
+					{
+						$escape_pass .= "\\" . substr( $profile_info{password}, $x, 1 );
+					}
+
+					# start OpenDLP
+					my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" start OpenDLP\'";
+					my $output = `$command`;
+					my $is_successful = 0;
+					if( $output =~ /(START_PENDING|RUNNING)/ )
+					{
+						$is_successful = 1;
+					}
+
+					if( $is_successful )
+					{
+						print "$ip: OpenDLP resumed<br>\n";
+
+						# update "control" in "systems" table
+						my $string = "UPDATE systems SET control=\"running\" WHERE scan=? AND ip=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $ip );
+					}
+					else
+					{
+						print "$ip: Got unexpected response from command. The agent may be resumed. Check the previous screen to verify.<br>\n";
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+		}
+
+		elsif( $action eq "uninstall" )
+		{
+			print "<heading>Uninstall Agents</heading><br><br>\n";
+
+			# if no arguments are given
+			if( $tracker eq "" && $scanname eq "" )
+			{
+				print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+			}
+
+			elsif( $scanname ne "" && $tracker eq "" )
+			{
+				print "Attempting to stop and uninstall agents...<br>\n";
+				get_profile();
+
+				# get all systems in "running" state
+				my @systems = ();
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT ip FROM systems WHERE scan=? AND control=\"running\"";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @systems, $$results[0];
+				}
+
+				# get all systems in "stopped" state
+				my $string = "SELECT ip FROM systems WHERE scan=? AND control=\"stopped\"";
+				$sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @systems, $$results[0];
+				}
+
+				# uniq @systems
+				my %seen = ();
+				@systems = grep {! $seen{$_}++} @systems;
+
+				my $length_of_systems = @systems;
+				if( $length_of_systems == 0 )
+				{
+					print "No agents are running or paused, so nothing will be stopped and uninstalled.<br><br>\n";
+				}
+				else
+				{
+					Proc::Queue::size( $profile_info{concurrent} );
+					foreach my $ip( @systems )
+					{
+						$length_of_systems--;
+
+						my $f = fork;
+						if( defined ($f) and $f == 0 )
+						{
+							print "Trying to stop and uninstall agent on $ip ($length_of_systems systems remain in queue)<br>\n";
+
+							my $escape_user = "";
+							my $length_user = length( $profile_info{username} );
+							my $x = 0;
+							for( $x = 0; $x < $length_user; $x++ )
+							{
+								$escape_user .= "\\" . substr( $profile_info{username}, $x, 1 );
+							}
+
+							my $escape_pass = "";
+							my $length_pass = length( $profile_info{password} );
+							my $x = 0;
+							for( $x = 0; $x < $length_pass; $x++ )
+							{
+								$escape_pass .= "\\" . substr( $profile_info{password}, $x, 1 );
+							}
+
+							# stop OpenDLP
+							my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" stop OpenDLP\'";
+							my $output = `$command`;
+							my $is_successful = 0;
+							if( $output =~ /(STOP_PENDING|STOPPED)/ )
+							{
+								$is_successful = 2;
+							}
+							elsif( $output =~ /The\ service\ has\ not\ been\ started/ )
+							{
+								$is_successful = 1;
+							}
+
+							if( $is_successful == 2 )
+							{
+								print "$ip: OpenDLP stopped<br>\n";
+
+								# update "control" in "systems" table
+								my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND ip=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname, $ip );
+							}
+							elsif( $is_successful == 1 )
+							{
+								print "$ip: OpenDLP already stopped<br>\n";
+							}
+							else
+							{
+								print "$ip: Got unexpected response from command. The agent may be stopped. Check the previous screen to verify.<br>\n";
+							}
+
+							# give Windows a few seconds to clean up and become sane
+							sleep(10);
+
+							# delete OpenDLP service
+							my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" delete OpenDLP\'";
+							my $output = `$command`;
+							my $is_successful = 0;
+							if( $output =~ /DeleteService\ SUCCESS/ )
+							{
+								$is_successful = 1;
+							}
+
+							if( $is_successful == 1 )
+							{
+								print "$ip: OpenDLP service deleted<br>\n";
+							}
+							else
+							{
+								print "$ip: Got unexpected response from command. The agent may be stopped. Check the previous screen to verify.<br>\n";
+							}
+
+							# delete all files in OpenDLP directory
+#							my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'cmd.exe /c del /Q \"$profile_info{path}\\*.*\"\'";
+#							`$command`;
+
+							# rm -rf OpenDLP
+							my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'cmd.exe /c rd \"$profile_info{path}\" /Q /S\'";
+							`$command`;
+
+							# update "control" in "systems" table
+							my $string = "UPDATE systems SET control=\"uninstalled\" WHERE scan=? AND ip=?";
+							$sth = $dbh->prepare( $string );
+							$sth->execute( $scanname, $ip );
+
+							print "$ip: OpenDLP stopped and uninstalled<br>\n";
+
+							exit(0);
+						}
+						1 while waitpid(-1, WNOHANG) > 0;
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+
+			# uninstall specific system
+			elsif( $scanname ne "" && $tracker ne "" )
+			{
+				get_profile();
+
+				# get system's IP
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT ip FROM systems WHERE scan=? AND tracker=? AND (control=\"stopped\" or control=\"running\")";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname, $tracker );
+				my $results = $sth->fetchrow_arrayref();
+				my $ip = $$results[0];
+
+				if( $ip eq "" )
+				{
+					print "Agent is not running or paused, so nothing will be stopped and uninstalled.<br><br>\n";
+				}
+				else
+				{
+					print "$ip: Attempting to stop and uninstall agent...<br>\n";
+
+					my $escape_user = "";
+					my $length_user = length( $profile_info{username} );
+					my $x = 0;
+					for( $x = 0; $x < $length_user; $x++ )
+					{
+						$escape_user .= "\\" . substr( $profile_info{username}, $x, 1 );
+					}
+
+					my $escape_pass = "";
+					my $length_pass = length( $profile_info{password} );
+					my $x = 0;
+					for( $x = 0; $x < $length_pass; $x++ )
+					{
+						$escape_pass .= "\\" . substr( $profile_info{password}, $x, 1 );
+					}
+
+					# stop OpenDLP
+					my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" stop OpenDLP\'";
+					my $output = `$command`;
+					my $is_successful = 0;
+					if( $output =~ /(STOP_PENDING|STOPPED)/ )
+					{
+						$is_successful = 2;
+					}
+					elsif( $output =~ /The\ service\ has\ not\ been\ started/ )
+					{
+						$is_successful = 1;
+					}
+
+					if( $is_successful == 2 )
+					{
+						print "$ip: OpenDLP stopped<br>\n";
+
+						# update "control" in "systems" table
+						my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND ip=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $ip );
+					}
+					elsif( $is_successful == 1 )
+					{
+						print "$ip: OpenDLP already stopped<br>\n";
+					}
+					else
+					{
+						print "$ip: Got unexpected response from command. The agent may be stopped. Check the previous screen to verify.<br>\n";
+					}
+
+					# give Windows a few seconds to clean up and become sane
+					sleep(10);
+
+					# delete OpenDLP service
+					my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'\"$profile_info{path}\\sc.exe\" delete OpenDLP\'";
+					my $output = `$command`;
+					my $is_successful = 0;
+					if( $output =~ /DeleteService\ SUCCESS/ )
+					{
+						$is_successful = 1;
+					}
+
+					if( $is_successful == 1 )
+					{
+						print "$ip: OpenDLP service deleted<br>\n";
+					}
+					else
+					{
+						print "$ip: Got unexpected response from command. The agent may be stopped. Check the previous screen to verify.<br>\n";
+					}
+
+					# delete all files in OpenDLP directory
+#					my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'cmd.exe /c del /Q \"$profile_info{path}\\*.*\"\'";
+#					`$command`;
+
+					# rm -rf OpenDLP
+					my $command = "winexe --user=\'$profile_info{domain}\'\\$escape_user --password=$escape_pass //$ip \'cmd.exe /c rd \"$profile_info{path}\" /Q /S\"\'";
+					`$command`;
+
+					# update "control" in "systems" table
+					my $string = "UPDATE systems SET control=\"uninstalled\" WHERE scan=? AND ip=?";
+					$sth = $dbh->prepare( $string );
+					$sth->execute( $scanname, $ip );
+
+					print "$ip: OpenDLP stopped and uninstalled<br>\n";
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+		}
+	}
+	elsif( $scantype =~ /^(mssql_agentless|mysql_agentless|win_agentless|unix_agentless|win_share)$/ )
+	{
+		my $scantype_print = "";
+		if( $scantype eq "mssql_agentless" )
+		{
+			$scantype_print = "MSSQL database";
+		}
+		elsif( $scantype eq "unix_agentless" )
+		{
+			$scantype_print = "UNIX agentless";
+		}
+		elsif( $scantype eq "mysql_agentless" )
+		{
+			$scantype_print = "MySQL database";
+		}
+		elsif( $scantype =~ /^(win_agentless)$/ )
+		{
+			$scantype_print = "Windows agentless";
+		}
+		elsif( $scantype =~ /^(win_share)$/ )
+		{
+			$scantype_print = "Windows share";
+		}
+
+		if( $action eq "pause" )
+		{
+			print "<heading>Pause $scantype_print scans</heading><br><br>\n";
+
+			get_profile();
+			# if no arguments are given
+			if( $tracker eq "" && $scanname eq "" )
+			{
+				print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+			}
+
+			elsif( $scanname ne "" && $tracker eq "" )
+			{
+				print "Attempting to pause $scantype_print scans...<br>\n";
+
+				# get all systems in "running" state
+				my @pids = ();
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT pid FROM systems WHERE scan=? AND control=\"running\"";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @pids, $$results[0];
+				}
+
+				my $length_of_pids = @pids;
+				if( $length_of_pids == 0 )
+				{
+					print "No $scantype_print scans are running, so nothing will be paused.<br><br>\n";
+				}
+				else
+				{
+					Proc::Queue::size( $profile_info{concurrent} );
+					foreach my $pid( @pids )
+					{
+						$length_of_pids--;
+
+						my $f = fork;
+						if( defined ($f) and $f == 0 )
+						{
+							print "Trying to pause $scantype_print scan on PID $pid ($length_of_pids $scantype_print scans remain in queue)<br>\n";
+
+							# pause OpenDLP
+							my $command = "kill -STOP $pid";
+							my $output = `$command`;
+							print "$pid: OpenDLP $scantype_print scan paused<br>\n";
+
+							# update "control" in "systems" table
+							my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND pid=?";
+							$sth = $dbh->prepare( $string );
+							$sth->execute( $scanname, $pid );
+
+							exit(0);
+						}
+						1 while waitpid(-1, WNOHANG) > 0;
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+
+			# pause specific system
+			elsif( $scanname ne "" && $tracker ne "" )
+			{
+				# get system's PID
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT pid FROM systems WHERE scan=? AND control=\"running\" AND tracker=?";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname, $tracker );
+				my $results = $sth->fetchrow_arrayref();
+				my $pid = $$results[0];
+
+				if( $pid eq "" )
+				{
+					print "$scantype_print scan is not running, so nothing will be paused.<br><br>\n";
+				}
+				else
+				{
+					print "$pid: Attempting to pause $scantype_print scan...<br>\n";
+
+					# pause OpenDLP remote scan
+					my $command = "kill -STOP $pid";
+					my $output = `$command`;
+					print "$pid: OpenDLP paused<br>\n";
+
+					# update "control" in "systems" table
+					my $string = "UPDATE systems SET control=\"stopped\" WHERE scan=? AND pid=?";
+					$sth = $dbh->prepare( $string );
+					$sth->execute( $scanname, $pid );
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+		}
+
+		elsif( $action eq "resume" )
+		{
+			print "<heading>Resume $scantype_print scans</heading><br><br>\n";
+
+			# if no arguments are given
+			if( $tracker eq "" && $scanname eq "" )
+			{
+				print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+			}
+
+			elsif( $scanname ne "" && $tracker eq "" )
+			{
+				print "Attempting to resume $scantype_print scans...<br>\n";
+				get_profile();
+
+				# get all systems in "stopped" state
+				my @pids = ();
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT pid FROM systems WHERE scan=? AND control=\"stopped\"";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @pids, $$results[0];
+				}
+
+				my $length_of_pids = @pids;
+				if( $length_of_pids == 0 )
+				{
+					print "No $scantype_print scans are paused, so nothing will be resumed.<br><br>\n";
+				}
+				else
+				{
+					Proc::Queue::size( $profile_info{concurrent} );
+					foreach my $pid( @pids )
+					{
+						$length_of_pids--;
+
+						my $f = fork;
+						if( defined ($f) and $f == 0 )
+						{
+							print "Trying to resume $scantype_print scan on PID $pid ($length_of_pids $scantype_print scans remain in queue)<br>\n";
+
+							# resume OpenDLP scan
+							my $command = "kill -CONT $pid";
+							my $output = `$command`;
+							print "$pid: OpenDLP $scantype_print scan resumed<br>\n";
+
+							# update "control" in "systems" table
+							my $string = "UPDATE systems SET control=\"running\" WHERE scan=? AND pid=?";
+							$sth = $dbh->prepare( $string );
+							$sth->execute( $scanname, $pid );
+
+							exit(0);
+						}
+						1 while waitpid(-1, WNOHANG) > 0;
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+
+			# resume specific scan
+			elsif( $scanname ne "" && $tracker ne "" )
+			{
+				get_profile();
+
+				# get system's PID
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT pid FROM systems WHERE scan=? AND control=\"stopped\" AND tracker=?";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname, $tracker );
+				my $results = $sth->fetchrow_arrayref();
+				my $pid = $$results[0];
+
+				if( $pid eq "" )
+				{
+					print "$scantype_print scan is not running, so nothing will be paused.<br><br>\n";
+				}
+				else
+				{
+					print "$pid: Attempting to resume $scantype_print scan...<br>\n";
+
+					# start OpenDLP
+					my $command = "kill -CONT $pid";
+					my $output = `$command`;
+					print "$pid: OpenDLP $scantype_print scan resumed<br>\n";
+						
+					# update "control" in "systems" table
+					my $string = "UPDATE systems SET control=\"running\" WHERE scan=? AND pid=?";
+					$sth = $dbh->prepare( $string );
+					$sth->execute( $scanname, $pid );
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+		}
+		elsif( $action eq "uninstall" )
+		{
+			print "<heading>Permanently stop $scantype_print scans</heading><br><br>\n";
+
+			# if no arguments are given
+			if( $tracker eq "" && $scanname eq "" )
+			{
+				print "No action will be taken: You must at least specify a scan name.<br><br>\n";
+			}
+
+			elsif( $scanname ne "" && $tracker eq "" )
+			{
+				print "Attempting to permanently stop $scantype_print scans...<br>\n";
+				get_profile();
+
+				# get all PIDs in "running" state
+				my @pids = ();
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT pid FROM systems WHERE scan=? AND control=\"running\"";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @pids, $$results[0];
+				}
+
+				# get all PIDs in "stopped" state
+				my $string = "SELECT pid FROM systems WHERE scan=? AND control=\"stopped\"";
+				$sth = $dbh->prepare( $string );
+				$sth->execute( $scanname );
+				while( my $results = $sth->fetchrow_arrayref() )
+				{
+					push @pids, $$results[0];
+				}
+
+				# uniq @pids
+				my %seen = ();
+				@pids = grep {! $seen{$_}++} @pids;
+
+				my $length_of_pids = @pids;
+				if( $length_of_pids == 0 )
+				{
+					print "No $scantype_print scans are running or paused, so nothing will be permanently stopped.<br><br>\n";
+				}
+				else
+				{
+					Proc::Queue::size( $profile_info{concurrent} );
+					foreach my $pid( @pids )
+					{
+						$length_of_pids--;
+
+						my $f = fork;
+						if( defined ($f) and $f == 0 )
+						{
+							print "Trying to permanently stop $scantype_print scan with PID $pid ($length_of_pids $scantype_print scans remain in queue)<br>\n";
+
+							# stop OpenDLP scan
+							my $command = "kill -9 $pid";
+							my $output = `$command`;
+							print "$pid: OpenDLP $scantype_print scan permanently stopped<br>\n";
+
+							# update "control" in "systems" table
+							my $string = "UPDATE systems SET control=\"uninstalled\" WHERE scan=? AND pid=?";
+							$sth = $dbh->prepare( $string );
+							$sth->execute( $scanname, $pid );
+
+							# delete any files in agentless table
+							if( $scantype eq "win_agentless" || $scantype eq "unix_agentless" || $scantype eq "win_share" )
+							{
+								my $string = "DELETE FROM agentless where scan=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname );
+
+								# delete any unzip temp directories for entire scan
+								my $string = "SELECT unzipdir FROM agentless_zip WHERE scan=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname );
+								while( my $results = $sth->fetchrow_arrayref() )
+								{
+									my $dir = $$results[0];
+									remove_tree( $dir );
+								}
+
+								# delete all entries from DB
+								my $string = "DELETE FROM agentless_zip WHERE scan=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname );
+							}
+							if( $scantype eq "unix_agentless" )
+							{
+								# unmount/rmdir any sshfs file systems
+								my $string = "SELECT mountdir FROM agentless_mount WHERE scan=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname );
+								while( my $results = $sth->fetchrow_arrayref() )
+								{
+									my $dir = $$results[0];
+									`fusermount -u $dir`;
+									sleep(5);
+									rmdir $dir;
+								}
+
+								# delete its entry in DB
+								my $string = "DELETE FROM agentless_mount WHERE scan=?";
+								$sth = $dbh->prepare( $string );
+								$sth->execute( $scanname );
+							}
+
+							exit(0);
+						}
+						1 while waitpid(-1, WNOHANG) > 0;
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+
+			# uninstall specific system
+			elsif( $scanname ne "" && $tracker ne "" )
+			{
+				get_profile();
+
+				# get system's PID 
+				my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+				my $string = "SELECT pid FROM systems WHERE scan=? AND tracker=? AND (control=\"stopped\" or control=\"running\")";
+				my $sth = $dbh->prepare( $string );
+				$sth->execute( $scanname, $tracker );
+				my $results = $sth->fetchrow_arrayref();
+				my $pid = $$results[0];
+
+				if( $pid eq "" )
+				{
+					print "$scantype_print scan is not running or paused, so nothing will be stopped and uninstalled.<br><br>\n";
+				}
+				else
+				{
+					print "$pid: Attempting to permanently stop $scantype_print scan...<br>\n";
+
+					# permanently stop OpenDLP scan
+					my $command = "kill -9 $pid";
+					my $output = `$command`;
+					print "$pid: OpenDLP $scantype_print scan permanently stopped<br>\n";
+
+					# update "control" in "systems" table
+					my $string = "UPDATE systems SET control=\"uninstalled\" WHERE scan=? AND pid=?";
+					$sth = $dbh->prepare( $string );
+					$sth->execute( $scanname, $pid );
+
+					if( $scantype eq "win_agentless" || $scantype eq "unix_agentless" || $scantype eq "win_share" )
+					{
+						# delete any files in agentless table
+						my $string = "DELETE FROM agentless where scan=? AND tracker=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $tracker );
+
+						# delete any unzip temp directories for entire scan
+						my $string = "SELECT unzipdir FROM agentless_zip WHERE scan=? AND tracker=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $tracker );
+						while( my $results = $sth->fetchrow_arrayref() )
+						{
+							my $dir = $$results[0];
+							remove_tree( $dir );
+						}
+
+						# delete all entries from DB
+						my $string = "DELETE FROM agentless_zip WHERE scan=? AND tracker=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $tracker );
+					}
+					if( $scantype eq "unix_agentless" )
+					{
+						# unmount/rmdir any sshfs file systems
+						my $string = "SELECT mountdir FROM agentless_mount WHERE scan=? AND tracker=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $tracker );
+						while( my $results = $sth->fetchrow_arrayref() )
+						{
+							my $dir = $$results[0];
+							`fusermount -u $dir`;
+							sleep(5);
+							rmdir $dir;
+						}
+
+						# delete its entry in DB
+						my $string = "DELETE FROM agentless_mount WHERE scan=? AND tracker=?";
+						$sth = $dbh->prepare( $string );
+						$sth->execute( $scanname, $tracker );
+					}
+				}
+
+				$sth->finish();
+				$dbh->disconnect();
+			}
+		}
+	}
+}
+
+
+#footer();
+
+sub get_profile
+{
+	my $dbh_profile = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+
+	# first get profile for scanname
+	my $string = "SELECT profile FROM systems WHERE scan=? LIMIT 1";
+	my $sth_profile = $dbh_profile->prepare( $string );
+	$sth_profile->execute( $scanname );
+	my $results = $sth_profile->fetchrow_arrayref();
+	my $profile = $$results[0];
+
+	my $string = "SELECT username,password,domain,path,concurrent,hash,metauser,metapass,metahost,metaport,metassl from profiles where profile=?";
+	$sth_profile = $dbh_profile->prepare( $string );
+	$sth_profile->execute( $profile );
+	my $results = $sth_profile->fetchrow_arrayref();
+
+	$profile_info{username}   = $$results[0];
+	$profile_info{password}   = $$results[1];
+	$profile_info{domain}     = $$results[2];
+	$profile_info{path}       = $$results[3];
+	$profile_info{concurrent} = $$results[4];
+
+	# If smbhash is not blank, set the environment variable SMBHASH
+	# to hold the value that will be passed to the host
+	if($$results[5] ne "")
+	{
+		$ENV{'SMBHASH'} = $$results[5];
+	}
+	$profile_info{metauser} = $$results[6];
+	$profile_info{metapass} = $$results[7];
+	$profile_info{metahost} = $$results[8];
+	$profile_info{metaport} = $$results[9];
+	$profile_info{metassl}  = $$results[10];
+
+	$sth_profile->finish();
+	$dbh_profile->disconnect();
+}
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+
+# make a fancy false positive interface in the next release
+#	print qq {
+#
+#	<script language="JavaScript">
+#	function fp(id, type, pattern, file, offset, md5)
+#	{
+#		var id_check = document.getElementById( id );
+#		if( id_check.checked == true )
+#		{
+#			alert(id + type + pattern + file + offset + md5);
+#		}
+#	}
+#	</script>
+#	};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\')\">\n";	
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+	
+	
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+
+sub PostStopOpenDLP {
+ # returns 0 for success.
+  # returns 1 for success with warning.
+  # returns -1 for error.
+
+  my $profile_info = shift(@_);  
+  my $sessionId = shift(@_);
+  my $scantype = shift(@_);  
+  my $metauser = $profile_info{metauser};
+  my $metapass = $profile_info{metapass};
+  my $path     = $profile_info{path};
+  my $metahost = $profile_info{metahost};
+  my $metaport = $profile_info{metaport};
+  my $metassl  = $profile_info{metassl};   
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  my $metaPostModule = MetaPostModule->new();			
+  #use default latency (100)
+  #use default timeout (30)
+
+  my $ret_code = 0;
+  if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "Error logging onto Metasploit.<br>\n";
+    print $metaPostModule->GetLastError() . "<br>\n";    
+    return -1;
+  }
+  
+  $metaPostModule->SetRemotePath($path);
+  $metaPostModule->SetSessionId($sessionId);
+  $metaPostModule->SetModuleName("windows/gather/opendlp");
+  return $metaPostModule->StopOpenDLP(); # 0= STOP_PENDING|STOPPED, 1=Service has not been started, -1=Service DNE
+}
+
+sub PostStartOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $profile_info = shift(@_);  
+  my $sessionId = shift(@_);
+  my $metauser = $profile_info{metauser};
+  my $metapass = $profile_info{metapass};
+  my $path     = $profile_info{path};
+  my $metahost = $profile_info{metahost};
+  my $metaport = $profile_info{metaport};
+  my $metassl  = $profile_info{metassl};  
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  my $metaPostModule = MetaPostModule->new();	
+  
+  my $ret_code = 0;
+  if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "Error logging onto Metasploit.<br>\n";
+    print $metaPostModule->GetLastError() . "<br>\n";    
+    return -1;
+  }
+  
+  #print "Logged in.<br>\n"; 
+  $metaPostModule->SetRemotePath($path);
+  $metaPostModule->SetSessionId($sessionId);
+  $metaPostModule->SetModuleName("windows/gather/opendlp");		
+  return $metaPostModule->StartOpenDLP(); # 0= STOP_PENDING|STOPPED, 1=Service has not been started, -1=Service DNE
+}
+
+sub PostDeleteOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $profile_info = shift(@_);  
+  my $sessionId = shift(@_);
+  my $metauser = $profile_info{metauser};
+  my $metapass = $profile_info{metapass};
+  my $path     = $profile_info{path};
+  my $metahost = $profile_info{metahost};
+  my $metaport = $profile_info{metaport};
+  my $metassl  = $profile_info{metassl};  
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  my $metaPostModule = MetaPostModule->new();	
+  
+  my $ret_code = 0;
+  if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "Error logging onto Metasploit.<br>\n";
+    print $metaPostModule->GetLastError() . "<br>\n";    
+    return -1;
+  }
+  if ($ret_code = $metaPostModule->AcquirePersistentToken()) {
+    print "Error retrieving persistent authentication token.<br>\n";
+    print $metaPostModule->GetLastError() . "<br>\n";
+  }
+  $metaPostModule->SetRemotePath($path);
+  $metaPostModule->SetSessionId($sessionId);
+  $metaPostModule->SetModuleName("windows/gather/opendlp");		
+  $ret_code = $metaPostModule->DeleteOpenDLP();
+  
+  if ($ret_code == 0) {   
+    print "Session $sessionId: OpenDLP service deleted<br>\n";
+  } else {
+    print "Session $sessionId: Got unexpected response from command. The agent may not be stopped. Check the previous screen to verify.<br>\n";
+  }
+  
+  sleep(3);  
+  my $rcode = $metaPostModule->RemoveRemotePath();
+  if ($rcode) { print "Session $sessionId: Error deleting remote files: " . $metaPostModule->GetLastError(); }
+  $metaPostModule->ReleasePersistentToken();
+  if ($ret_code) { return $ret_code; }
+  return $rcode;
+}
+sub MetaStopOpenDLP {  
+  # returns 0 for success.
+  # returns 1 for success with warning.
+  # returns -1 for error.
+
+  my $profile_info = shift(@_);  
+  my $sessionId = shift(@_);
+  my $scantype = shift(@_);
+  if ($scantype eq "post_agent") { return PostStopOpenDLP($profile_info, $sessionId); }
+  my $metauser = $profile_info{metauser};
+  my $metapass = $profile_info{metapass};
+  my $path     = $profile_info{path};
+  my $metahost = $profile_info{metahost};
+  my $metaport = $profile_info{metaport};
+  my $metassl  = $profile_info{metassl};   
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  my $metaSploiter = MetaSploiter->new();			
+  #use default latency (100)
+  #use default timeout (30)
+
+  my $ret_code = 0;
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "Error logging onto Metasploit.<br>\n";
+    print $metaSploiter->GetLastError() . "<br>\n";    
+    return -1;
+  }
+  #print "Logged in.<br>\n";
+  $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "stop", "OpenDLP");  
+  my $output = $metaSploiter->GetCommandResponse();    
+  if ($output =~ /(STOP_PENDING|STOPPED)/) { return 0; }
+  elsif( $output =~ /The\ service\ has\ not\ been\ started/ ) { return 1; }
+  return -1;
+}
+
+sub MetaStartOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $profile_info = shift(@_);  
+  my $sessionId = shift(@_);
+  my $scantype = shift(@_);
+  if ($scantype eq "post_agent") { return PostStartOpenDLP($profile_info, $sessionId); }
+  my $metauser = $profile_info{metauser};
+  my $metapass = $profile_info{metapass};
+  my $path     = $profile_info{path};
+  my $metahost = $profile_info{metahost};
+  my $metaport = $profile_info{metaport};
+  my $metassl  = $profile_info{metassl};  
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  my $metaSploiter = MetaSploiter->new();			
+  #use default latency (100)
+  #use default timeout (30)
+
+  my $ret_code = 0;  
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "Error logging onto Metasploit.<br>\n";
+    print $metaSploiter->GetLastError() . "<br>\n";    
+    return -1;
+  }
+  $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "start", "OpenDLP");
+  my $output = $metaSploiter->GetCommandResponse();      
+	if( $output =~ /(START_PENDING|RUNNING)/ ) { return 0; }
+	return -1;
+}
+
+
+sub MetaDeleteOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $profile_info = shift(@_);  
+  my $sessionId = shift(@_);
+  my $scantype = shift(@_);
+  if ($scantype eq "post_agent") { return PostDeleteOpenDLP($profile_info, $sessionId); } 
+  my $metauser = $profile_info{metauser};
+  my $metapass = $profile_info{metapass};
+  my $path     = $profile_info{path};
+  my $metahost = $profile_info{metahost};
+  my $metaport = $profile_info{metaport};
+  my $metassl  = $profile_info{metassl};  
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  my $metaSploiter = MetaSploiter->new();			
+  #use default latency (100)
+  #use default timeout (30)
+
+  my $ret_code = 0;
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "Error logging onto Metasploit.<br>\n";
+    print $metaSploiter->GetLastError() . "<br>\n";    
+    return -1;
+  }
+  if ($ret_code = $metaSploiter->AcquirePersistentToken()) {
+    print "Error retrieving persistent authentication token.<br>\n";
+    print $metaSploiter->GetLastError() . "<br>\n";
+  }
+  $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "delete", "OpenDLP");
+  my $output = $metaSploiter->GetCommandResponse();  
+  my $ret_code = 0;
+  if( $output =~ /DeleteService\ SUCCESS/) {
+    $ret_code = 0;
+    print "Session $sessionId: OpenDLP service deleted<br>\n";
+  } else {
+    $ret_code = 1;
+    print "Session $sessionId: Got unexpected response from command. The agent may not be stopped. Check the previous screen to verify.<br>\n";
+  }
+  
+  sleep(3);  
+  $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+  $metaSploiter->ChangeRemotePath($sessionId, "/"); # make sure we're not keeping a handle in the directory open.
+  $metaSploiter->RemoteExecute($sessionId, "\"$path/remove.bat\"");  
+  sleep(3);
+  $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.        
+  $metaSploiter->SendAndWait($sessionId, "rmdir \"$path\"");   
+  $metaSploiter->MeterpreterRead($sessionId); # Eat anything in the buffer.    
+  $metaSploiter->ReleasePersistentToken();        
+  return $ret_code; 
+}

@@ -1,0 +1,419 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+use MIME::Base64;
+use Filesys::SmbClient;
+use MetaSploiter;
+use MetaPostModule;
+
+my $version = get_version();
+
+my $db_admin_file = "../etc/db_admin";
+
+my( $file, $ip, $profile, $decoded_file ) = "";
+my $MAX_LENGTH_PROFILE = 64;
+my( $db_username, $db_password ) = "";
+my @FPs = ();
+my $sessionid = "";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+my $query = CGI->new;
+$file = $query->param('file');
+$ip = $query->param('ip');
+$profile = $query->param('profile');
+$sessionid = $query->param('sessionid');
+
+if( $profile ne "" && $ip ne "" && $file ne "" )
+{
+#	header();
+#	print "Profile: $profile<br>\n";
+#	print "IP: $ip<br>\n";
+	$file = decode_base64( $file );
+	$ip = decode_base64( $ip );
+	$profile = decode_base64( $profile );
+
+#	print "File: $file<br>\n";
+#	print "SMB File: $smb_file<br>\n";
+
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $string = "SELECT username,password,domain,hash,scantype,metauser,metapass,metahost,metaport,metapath,metalatency,metatimeout,metassl from profiles where profile=?";
+
+	my $sth = $dbh->prepare( $string );
+	$sth->execute( $profile );
+	my $results = $sth->fetchrow_arrayref();
+	my $username = $$results[0];
+	my $password = $$results[1];
+	my $domain = $$results[2];
+	my $smbhash = $$results[3];
+	my $scantype = $$results[4];
+	my $metauser = $$results[5];
+	my $metapass = $$results[6];
+	my $metahost = $$results[7];
+	my $metaport = $$results[8];
+	my $metapath = $$results[9];
+	my $metalatency = $$results[10];
+	my $metatimeout = $$results[11];
+	my $metassl     = $$results[12];
+		
+  if ($scantype eq "meta_agent") { 
+		$sth->finish();
+		$dbh->disconnect();
+    header();    
+    if ($sessionid eq "") { 
+      print "Error: No sessionId supplied, cannot determine who to download from<br>\n"; 
+    }
+    else {
+      my $savPath = "$metapath/$profile/session_$sessionid-[$ip]";
+      $savPath =~ s/\\/\//g;
+      print "<br><Br><br><br><Br>\n";
+      print "<table border=0 cellspacing=0 cellpadding=0 width=\"60%\" align=center><tr><td>\n";
+      print "<h2>Notice:</h2>\n";
+      print "Files located on a remote system connected to Metasploit can only be downloaded ";
+      print "from the remote system to the Metasploit server. There is no RPC method for transferring ";
+      print "those files from Metasploit back to this OpenDLP server. Therefore, files will ";
+      print "be saved on the Metasploit server, in the local path '$savPath'.\n";
+      print "</td></tr><tr><td><hr></td></tr><tr><td>\n";
+           
+      
+      my $ret_code = 0;
+      $file =~ s/\\/\//g; # replaces backslash with forward slash
+      my $metaSploiter = MetaSploiter->new();			
+      $metaSploiter->SetLatency($metalatency); 
+      $metaSploiter->SetTimeout($metatimeout);
+      print ">>> Logging user $metauser onto Metasploit Server.<br>\n";
+      $ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl);
+     
+      $metaSploiter->MeterpreterRead($sessionid); # Eat anything in the buffer.        
+      if ($ret_code == 0) {
+        print ">>> Changing local path to Metasploit path (from profile).<br>\n";
+        $ret_code = $metaSploiter->ChangeLocalPath($sessionid, $metapath);
+      }    
+      #todo: Append $file's path information to $savPath.
+      #for instance, if $savPath is "C:\opendlp\bin\meta1\session_1-[192.168.1.102]"
+      #and $file is "c:\taco\bell\burrito.txt" then save to
+      #C:\opendlp\bin\meta1\session_1-[192.168.1.102]\c_\taco\bell\burrito.txt".
+      #(Currently it is saved to "C:\opendlp\bin\meta1\session_1-[192.168.1.102]\burrito.txt"  .
+      if ($ret_code == 0) {
+        print ">>> Downloading file...<br>\n";
+        $ret_code = $metaSploiter->DownloadFile($sessionid, $file, $savPath);        
+      }      
+      if ($ret_code == 0) {
+        print "<br>File <b>'$file'</b> on Session $sessionid ($ip) transferred to <b>'<font color=green>$savPath</font>'</b> on metasploit system.<br>\n";
+      } else {
+        if ($metaSploiter->GetLastError() =~/unknown\ session\ while\ validating/) {        
+          print "<br><font color=red>It appears Session $sessionid has died. <BR><BR>";          
+        } else {
+          print "<br><font color=red>Error: ". $metaSploiter->GetLastError() . "</font><br><br>\n";
+        }
+        print "OpenDLP tried with the following information:<br>\n";
+        print "Profile: $profile<br>\n";			
+        print "Scan Type: $scantype<BR>\n";
+        print "Metasploit Host: $metahost<br>\n";
+        print "Metasploit Port: $metaport<br>\n";
+        print "Metasploit Use SSL: $metassl<BR>\n";
+        print "Metasploit Username: $metauser<br>\n";
+        print "Metasploit Password: $metapass<br>\n";			
+        print "Metasploit Session Id: $sessionid<br>\n";			
+        print "Remote file: $file<br>\n";			
+        print "Destination path: $metapath  (on metasploit server)<br>\n"	;		
+      }
+      print "</td></tr><tr><td>&nbsp;</td></tr>";
+      print "<tr><td><FORM><INPUT TYPE=\"BUTTON\" VALUE=\"Back\" ONCLICK=\"history.go(-1)\"></FORM>";
+      print "</td></tr></table>\n";      
+      footer();
+    }  #else (sessionid does exist)
+  } #if ($scantype eq "meta_agent") 
+  elsif($scantype eq "post_agent") {    
+    $sth->finish();
+		$dbh->disconnect();
+    
+    if ($sessionid eq "") { 
+      header();
+      print "Error: No sessionId supplied, cannot determine who to download from<br>\n"; 
+      footer();
+      exit(0);
+    }    
+    my $postMod = MetaPostModule->new();		
+    $postMod->SetLatency($metalatency); 
+    $postMod->SetTimeout($metatimeout);    
+    $postMod->SetModuleName("windows/gather/opendlp");        
+    $postMod->SetSessionId($sessionid);
+        
+    if ($ret_code = $postMod->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) { goto DONE; }    
+    if ($ret_code = $postMod->CheckForModule())         { goto DONE; }    
+    if ($ret_code = $postMod->AcquirePersistentToken()) { goto DONE; }    
+    if ($ret_code = $postMod->ReadFile($file) )         { goto DONE; }    
+    my $file_contents = $postMod->GetFileData();    
+        
+    DONE:
+    my $lastError = $postMod->GetLastError();
+    $postMod->ReleasePersistentToken();
+    if ($ret_code) {
+      header();
+      if ($lastError =~/The\ following\ options\ failed\ to\ validate:\ SESSION/) {
+        print "<br><font color=red>It appears Session $sessionId has died. <BR><BR>";          
+      } else {
+        print "<br><font color=red>Error: ". $lastError . "</font><br><br>\n";
+      }
+      print "OpenDLP tried with the following information:<br>\n";
+      print "Profile: $profile<br>\n";			
+      print "Scan Type: $scantype<BR>\n";
+      print "Metasploit Host: $metahost<br>\n";
+      print "Metasploit Port: $metaport<br>\n";
+      print "Metasploit Use SSL: $metassl<BR>\n";
+      print "Metasploit Username: $metauser<br>\n";
+      print "Metasploit Password: $metapass<br>\n";			
+      print "Metasploit Session Id: $sessionid<br>\n";			
+      print "Remote file: $file<br>\n";			
+      footer();
+    } else {
+     
+			my @file_parts = split( ":", $file );
+			my $download_filename = $file_parts[1];
+			$download_filename =~ s/^.*\\//g;
+			$download_filename =~ s/:.*$//g;
+#			$download_filename =~ s/\ /\%20/g;
+			$download_filename = $ip . "-" . $download_filename;
+			$download_filename =~ s/\\/_/g;
+			my $content_length = length( $file_contents );
+
+			print "Content-Length: $content_length\n";
+			print "Content-Type: application/data\n";
+			print "Content-Disposition: attachment; filename=\"$download_filename\"\n\n";
+			print "$file_contents";
+    }
+   
+  }
+	elsif( $scantype eq "win_agent" || $scantype eq "win_agentless" || $scantype eq "win_share" )
+	{
+		my $smb_file = "";
+
+		if( $scantype eq "win_agent" )
+		{
+			my @file_parts = split( ":", $file );
+			$smb_file = "smb://$ip/";
+			$smb_file .= $file_parts[0] . "\$" . $file_parts[1];
+			$smb_file =~ s/\\/\//g;
+		}
+		elsif( $scantype eq "win_agentless" || $scantype eq "win_share" )
+		{
+			my @file_parts = split( ":", $file );
+			$smb_file = $file_parts[0] . ":" . $file_parts[1];
+		}
+
+#		print "Username: $username<br>\n";
+#		print "Password: $password<br>\n";
+#		print "Domain: $domain<br>\n";
+
+		$sth->finish();
+		$dbh->disconnect();
+
+		my $file_contents = "";
+		my $smb_error = "";
+
+		# If smbhash is not blank, setup the environment variable
+		if($smbhash ne "")
+		{
+			$ENV{'SMBHASH'} = $smbhash;
+		}
+
+		my $smb = new Filesys::SmbClient( username => $username, password => $password, workgroup => $domain );
+		my $fd = $smb->open( $smb_file, '0666' ) or $smb_error = $!;
+		if( $smb_error eq "" )
+		{
+			while( defined( my $buffer = $smb->read( $fd )))
+			{
+				$file_contents .= $buffer;
+				last if $buffer eq '';
+			}
+			$smb->close( $fd );
+#			print "<br><br>File:<br>\n";
+#			print "$file_contents<br>\n";
+			my @file_parts = split( ":", $file );
+			my $download_filename = $file_parts[1];
+			$download_filename =~ s/^.*\\//g;
+			$download_filename =~ s/:.*$//g;
+#			$download_filename =~ s/\ /\%20/g;
+			$download_filename = $ip . "-" . $download_filename;
+			$download_filename =~ s/\\/_/g;
+			my $content_length = length( $file_contents );
+
+			print "Content-Length: $content_length\n";
+			print "Content-Type: application/data\n";
+			print "Content-Disposition: attachment; filename=\"$download_filename\"\n\n";
+			print "$file_contents";
+		}
+		else
+		{
+			header();
+			print "Error: $smb_error<br><br>\n";
+			print "OpenDLP tried with the following information:<br>\n";
+			print "Profile: $profile<br>\n";
+			print "System: $ip<br>\n";
+			print "Username: $username<br>\n";
+			print "Password: ***********************<br>\n";
+			print "Workgroup: $domain<br>\n";
+			print "Local file: $file<br>\n";
+			print "SMB file: $smb_file<br>\n";
+		}
+	}
+	elsif( $scantype eq "unix_agentless" )
+	{
+		if( !(-d "/tmp/OpenDLP" ))
+		{
+			mkdir "/tmp/OpenDLP";
+		}
+
+		# create local directory at which to mount remote sshfs
+		my $subdir = 1;
+		while( (mkdir "/tmp/OpenDLP/$subdir") == 0 )
+		{
+			$subdir++;
+		}
+		$local_dir = "/tmp/OpenDLP/$subdir";
+
+		# mount remote SSHFS at $local_dir
+		my $command = "echo ";
+		for( my $x = 0; $x < length( $password ); $x++ )
+		{
+			my $char = substr( $password, $x, 1 );
+			$command .= "\\" . $char;
+		}
+		$command .= " | sshfs ";
+		for( my $x = 0; $x < length( $username ); $x++ )
+		{
+			my $char = substr( $username, $x, 1 );
+			$command .= "\\" . $char;
+		}
+		$command .= "\@" . "$ip" . ":/ $local_dir -o idmap=none,password_stdin,nonempty,UserKnownHostsFile=/dev/null,StrictHostKeyChecking=no";
+		`$command`;
+
+		# open file for reading
+		$file =~ s/\:.*$//g;
+		my $absolute_file = $local_dir . "/" . $file;
+		$absolute_file =~ s/\/+/\//g;
+
+		# get filesize
+		my @tab = stat( $absolute_file );
+		my $filesize = "";
+		if( $#tab != 0 )
+		{
+			$filesize = $tab[7];
+		}
+		open( my $fd, "<", $absolute_file );
+		if( $fd ne "" )
+		{
+			my $file_contents = "";
+			# read 4096 bytes at a time
+			while( defined(read( $fd, my $buffer, 4096 )))
+			{
+				$file_contents .= $buffer;
+				if( $buffer eq '' )
+				{
+					last;
+				}
+			}
+
+			# present for downloading
+			my $download_filename = $file;
+			$download_filename =~ s/\//_/g;
+			$download_filename = $ip . "-" . $download_filename;
+			print "Content-Length: $filesize\n";
+			print "Content-Type: application/data\n";
+			print "Content-Disposition: attachment; filename=\"$download_filename\"\n\n";
+			print "$file_contents";
+
+			close( $fd );
+		}
+		else
+		{
+			header();
+			print "Error: $smb_error<br><br>\n";
+			print "OpenDLP tried with the following information:<br>\n";
+			print "Profile: $profile<br>\n";
+			print "System: $ip<br>\n";
+			print "Username: $username<br>\n";
+			print "Password: ***********************<br>\n";
+			print "Local file: $file<br>\n";
+			print "Absolute file: $absolute_file<br>\n";
+		}
+		# umount sshfs
+		`fusermount -u $local_dir`;
+		rmdir $local_dir;
+	}
+}
+
+else
+{
+	header();
+	print "Error:<br>\n";
+	if( $ip eq "" )
+	{
+		print "OpenDLP needs IP address<br>\n";
+	}
+	if( $domain eq "" )
+	{
+		print "OpenDLP needs the workgroup or domain<br>\n";
+	}
+	if( $profile eq "" )
+	{
+		print "OpenDLP needs the scan profile<br>\n";
+	}
+}
+
+#footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

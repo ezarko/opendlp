@@ -1,0 +1,1558 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+use CGI qw/:standard/;
+use DBI;
+use Filesys::SmbClient;
+use POSIX ":sys_wait_h";
+use Proc::Queue;
+use MIME::Base64;
+use MetaSploiter;
+use MetaPostModule;
+
+my $version = get_version();
+
+my $is_valid = 1;
+my $MAX_LENGTH_PROFILE = 64;
+my $MAX_LENGTH_SCAN = 64;
+my $MAX_LENGTH_URL = 256;
+my $MAX_CONCURRENT = 50;
+my $db_admin_file = "../etc/db_admin";
+my $sc_path = "../../bin/sc.exe";
+my $db_bin_file = "../../bin/db.pl";
+my $agentless_bin_file = "../../bin/agentless.pl";
+my $agentless_unix_file = "../../bin/agentless-unix.pl";
+my $OpenDLPz_path = "../../bin/OpenDLPz.exe";
+my $client_pem_path = "../../bin/client.pem";
+my $server_pem_path = "../../bin/server.pem";
+
+my( $scanname, $profile, $systems ) = "";
+my( $db_username, $db_password ) = "";
+my $scantype = "";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if( request_method() ne "POST" )
+{
+	$is_valid = 0;
+	print "Only POST requests are allowed. Try starting <a href=start-new.html>here</a>.<br>\n";
+}
+
+foreach $p (param())
+{
+	$form{$p} = param($p);
+	if( $p eq "scanname" )
+	{
+		$scanname = $form{$p};
+		if( length( $scanname ) > $MAX_LENGTH_SCAN )
+		{
+			$is_valid = 0;
+			print "Scan name is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+		}
+		if( $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+		{
+			$is_valid = 0;
+			print "Scan name can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+		}
+		my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+		my $string = "SELECT scan from systems where scan=?";
+		my $sth = $dbh->prepare( $string );
+		$sth->execute( $scanname );
+		my $results = $sth->fetchrow_arrayref();
+		if( $$results[0] ne "" )
+		{
+			$is_valid = 0;
+			print "A scan with the same name already exists. Choose a unique scan name.<br><br>\n";
+		}
+		$sth->finish();
+		$dbh->disconnect();
+	}
+
+	if( $p eq "profile" )
+	{
+		$profile = $form{$p};
+		if( length( $profile ) > $MAX_LENGTH_PROFILE )
+		{
+			$is_valid = 0;
+			print "Profile is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+		}
+		if( $profile !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+		{
+			$is_valid = 0;
+			print "Profile can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+		}
+	}
+
+	if( $p eq "systems" )
+	{
+		$systems = $form{$p};
+
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system eq "" )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has stray newline character.<br><br>\n";
+			}
+		}
+	}
+}
+
+if( $is_valid )
+{
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+  my $string = "SELECT username,password,domain,exts,ignore_exts,dirs,ignore_dirs,regex,path,phonehomeurl,phonehomeuser,phonehomepass,delaytime,description,debug,concurrent,creditcards,zipfiles,memory,hash,ignore_dbs,dbs,ignore_tables,tables,ignore_columns,columns,rows,scantype,metahost,metaport,metauser,metapass,metapath,metalatency,metatimeout,metassl from profiles where profile=?;";
+
+	my $sth = $dbh->prepare( $string );
+	$sth->execute( $profile );
+	my $results = $sth->fetchrow_arrayref();
+	
+	my $username = $$results[0];
+	my $password = $$results[1];
+	my $domain = $$results[2];
+	my $exts = $$results[3];
+	my $ignore_exts = $$results[4];
+	my $dirs = $$results[5];
+	my $ignore_dirs = $$results[6];
+	my $regexes = $$results[7];
+	my $path = $$results[8];
+	my $phonehomeurl = $$results[9];
+	my $phonehomeuser = $$results[10];
+	my $phonehomepass = $$results[11];
+	my $delaytime = $$results[12];
+	my $description = $$results[13];
+	my $debug = $$results[14];
+	my $concurrent = $$results[15];
+	my $creditcards = $$results[16];
+	my $zipfiles = $$results[17];
+	my $memory = $$results[18];
+	my $smbhash = $$results[19];
+	my $ignore_dbs = $$results[20];
+	my $dbs = $$results[21];
+	my $ignore_tables = $$results[22];
+	my $tables = $$results[23];
+	my $ignore_columns = $$results[24];
+	my $columns = $$results[25];
+	my $rows = $$results[26];
+	my $scantype = $$results[27];
+	my $metahost = $$results[28];
+	my $metaport = $$results[29];
+	my $metauser = $$results[30];
+	my $metapass = $$results[31];
+	my $metaSourcePath = $$results[32];
+	my $metaLatency = $$results[33];
+	my $metatimeout = $$results[34];
+	my $metassl = $$results[35];
+
+	if( $username eq "" && $scantype != "win_share" && $scantype != "meta_agent" && $scantype != "post_agent")
+	{
+		print "Username cannot be blank<br><br>\n";
+		$is_valid = 0;
+	}
+	if( $regexes eq "" )
+	{
+		print "No regular expressions selected<br><br>\n";
+		$is_valid = 0;
+	}
+	if( $debug !~ /^(0|1|2|3)$/ )
+	{
+		print "Log verbosity must be 0, 1, 2 or 3<br><br>\n";
+	}
+
+
+	# Different scan types allow different characters in the list of systems to be scanned.
+	# We must perform individual checks for each scan type. We cannot combine this.
+	if( $scantype eq "unix_agentless" )
+	{
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system !~ /^[A-Z0-9\.\-\_]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character.<br><br>\n";
+			}
+		}
+	}
+
+
+	# Different scan types allow different characters in the list of systems to be scanned.
+	# We must perform individual checks for each scan type. We cannot combine this.
+	if( $scantype =~ /^mysql_agentless$/ )
+	{
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system !~ /^[A-Z0-9\.\-\_]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character.<br><br>\n";
+			}
+		}
+	}
+
+
+	# Different scan types allow different characters in the list of systems to be scanned.
+	# We must perform individual checks for each scan type. We cannot combine this.
+	if( $scantype =~ /^mssql_agentless$/ )
+	{
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system !~ /^[A-Z0-9\.\-\_\\]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character.<br><br>\n";
+			}
+		}
+	}
+
+
+	if( $scantype eq "win_agent" )
+	{
+		if( $domain eq "" )
+		{
+			print "Domain cannot be blank<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $path eq "" )
+		{
+			print "Path cannot be blank<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $phonehomeurl eq "" )
+		{
+			print "Phone home URL cannot be blank<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $delaytime eq "" )
+		{
+			print "Delay time cannot be blank<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $domain !~ /^[A-Z0-9\-_]+$/i )
+		{
+			print "Windows domain can only contain alphanumeric, dash, and underscore characters<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $username =~ /\"\/\\\[\]\:\;\|\=\,\+\*\?\<\>/ )
+		{
+			print "Username contains illegal characters<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $memory != .01 && $memory != .02 && $memory != .05 && $memory != .1 && $memory != .15 && $memory != .2 && $memory != .25 )
+		{
+			print "Invalid memory limitation. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+			$is_valid = 0;
+		}
+
+		# Different scan types allow different characters in the list of systems to be scanned.
+		# We must perform individual checks for each scan type. We cannot combine this.
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system !~ /^[A-Z0-9\.\-\_]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character.<br><br>\n";
+			}
+		}
+	}
+
+
+	if( $scantype eq "win_agentless" )
+	{
+		if( $domain eq "" )
+		{
+			print "Domain cannot be blank<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $domain !~ /^[A-Z0-9\-_]+$/i )
+		{
+			print "Windows domain can only contain alphanumeric, dash, and underscore characters<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $username =~ /\"\/\\\[\]\:\;\|\=\,\+\*\?\<\>/ )
+		{
+			print "Username contains illegal characters<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $memory != .01 && $memory != .02 && $memory != .05 && $memory != .1 && $memory != .15 && $memory != .2 && $memory != .25 )
+		{
+			print "Invalid memory limitation. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+			$is_valid = 0;
+		}
+
+		# Different scan types allow different characters in the list of systems to be scanned.
+		# We must perform individual checks for each scan type. We cannot combine this.
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system !~ /^[A-Z0-9\.\-\_]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character.<br><br>\n";
+			}
+		}
+	}
+
+
+	if( $scantype eq "win_share" )
+	{
+		if( $username =~ /\"\/\\\[\]\:\;\|\=\,\+\*\?\<\>/ )
+		{
+			print "Username contains illegal characters<br><br>\n";
+			$is_valid = 0;
+		}
+		if( $memory != .01 && $memory != .02 && $memory != .05 && $memory != .1 && $memory != .15 && $memory != .2 && $memory != .25 )
+		{
+			print "Invalid memory limitation. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+			$is_valid = 0;
+		}
+
+		# Different scan types allow different characters in the list of systems to be scanned.
+		# We must perform individual checks for each scan type. We cannot combine this.
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			# invalid characters for Windows shares are: " / \ [ ] : | < > + ; , ? * =
+			if( $system !~ /^[A-Z0-9\.\-\_\!\@\#\$\%\^\&\(\)\`\~\{\}\\\'\ ]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character. Shares cannot contain the following characters for their folder names: \" / \ [ ] : | < > + ; , ? * =<br><br>\n";
+			}
+		}
+	}
+
+
+	if ($scantype eq "meta_agent" || $scantype eq "post_agent")
+	{	
+		if ($path eq "") { print "Path cannot be blank<br><br>\n";          $is_valid = 0; }
+		if ($phonehomeurl eq "") { print "Phone home URL cannot be blank<br><br>\n";           $is_valid = 0; }
+		if ($delaytime eq "") { print "Delay time cannot be blank<br><br>\n";          $is_valid = 0; }
+		if ($metaSourcePath eq "") { print "Metasploit local source path cannot be blank.<br>\n";           $is_valid = 0; }
+		if ($metahost eq "") { print "Metasploit host cannot be blank<br>\n";               $is_valid = 0; }
+		if ($metaport eq "") { print "Metasploit port cannot be blank.<br>\n";              $is_valid = 0; }
+		if ($metauser eq "") { print "Metasploit user cannot be blank.<br>\n";              $is_valid = 0; }
+		if ($metapass eq "") { print "Metasploit password cannot be blank.<br>\n";          $is_valid = 0; }
+		if ($memory != .01 && $memory != .02 && $memory != .05 && $memory != .1 && $memory != .15 && $memory != .2 && $memory != .25 )
+		{
+			print "Invalid memory limitation. It must be 1%, 2%, 5%, 10%, 15%, 20%, or 25%.<br><br>\n";
+			$is_valid = 0;
+		}
+
+		# Different scan types allow different characters in the list of systems to be scanned.
+		# We must perform individual checks for each scan type. We cannot combine this.
+		my @system_temp = split( "\n", $systems );
+		foreach my $system( @system_temp )
+		{
+			$system =~ s/\r$//g;
+			$system =~ s/\n$//g;
+
+			chomp $system;
+			if( $system !~ /^[A-Z0-9\.\-\_]+$/i )
+			{
+				$is_valid = 0;
+				print "\"Systems to scan\" has an invalid character.<br><br>\n";
+			}
+		}
+	}
+
+	
+	################
+	# BUILD CONFIG #
+	################
+  #Moved this out of the win_agent case because meta_agent/post_agent uses it as well.
+  my $config = "# Scan name\n";
+  $config .= "scan=$scanname\n";
+
+  $config .= "\n# Profile name\n";
+  $config .= "profile=$profile\n";
+
+  # config file - extensions
+  $config .= "\n# Ignore certain extensions? Valid options are:\n";
+  $config .= "#   everything - scan all files regardless of extension\n";
+  $config .= "#   ignore - ignore files ending in the following extensions\n";
+  $config .= "#   allow - only look at files ending in the following extensions\n";
+  $config .= "ext_opt=$ignore_exts\n";
+  my @extensions = split( "\n", $exts );
+  foreach my $blah( @extensions )
+  {
+    $blah =~ s/\n$//g;
+    $blah =~ s/\r$//g;
+    $config .= "ext=$blah\n";
+  }
+
+  # config file - directories
+  $config .= "\n# Ignore certain directories? Valid options are:\n";
+  $config .= "#   everything - scan all directories\n";
+  $config .= "#   ignore - ignore the following directories\n";
+  $config .= "#   allow - only scan the following directories\n";
+  $config .= "dir_opt=$ignore_dirs\n";
+  my @directories = split( "\n", $dirs );
+  foreach my $blah( @directories )
+  {
+    $blah =~ s/\n$//g;
+    $blah =~ s/\r$//g;
+    $config .= "dir=$blah\n";
+  }
+
+  # config file - regexes
+  $config .= "\n# Use the following regular expressions\n";
+  my @regex_array = split( ",", $regexes );
+  foreach my $regex_item( @regex_array )
+  {
+    my $string = "SELECT name,pattern FROM regexes WHERE number=?;";
+    $sth = $dbh->prepare( $string );
+    $sth->execute( $regex_item );
+    $results = $sth->fetchrow_arrayref();
+
+    $config .= "regex=$$results[0]:$$results[1]\n";
+  }
+
+  # config file - credit card regexes for mod10 checks
+  $config .= "\n# This is used so the OpenDLP agent knows which regexes are credit card numbers.\n";
+  $config .= "# Knowing this, the OpenDLP agent will perform further checks on these potential matches\n";
+  $config .= "# to determine if they are valid credit card numbers.\n";
+  my @ccs = split( "\n", $creditcards );
+  foreach my $blah( @ccs )
+  {
+    $blah =~ s/\n$//g;
+    $blah =~ s/\r$//g;
+    $config .= "creditcard=$blah\n";
+  }
+
+  # config file - zip file extensions
+  $config .= "\n# These file extensions tell OpenDLP to process the files as ZIPs.\n";
+  my @zips = split( "\n", $zipfiles );
+  foreach my $blah( @zips )
+  {
+    $blah =~ s/\n$//g;
+    $blah =~ s/\r$//g;
+    $config .= "zipfile=$blah\n";
+  }
+
+  # config file - misc
+  $config .= "\n# This is the duration to wait before uploading new results to the web server.\n";
+  $config .= "wait=$delaytime\n";
+  $config .= "\n# This is the location where to upload scan data.\n";
+  $config .= "uploadurl=$phonehomeurl\n";
+  $config .= "\n# This is the username for the upload URL.\n";
+  $config .= "urluser=$phonehomeuser\n";
+  $config .= "\n# This is the password for the upload URL.\n";
+  $config .= "urlpass=$phonehomepass\n";
+  $config .= "\n# This is the setting that controls the verbosity of logs.\n";
+  $config .= "debug=$debug\n";
+  $config .= "\n# This is the maximum percent of available memory to use for processing files.\n";
+  $config .= "# If a file is greater than this, it will be split into chunks.\n";
+  $config .= "memory=$memory\n";
+  ####################
+  # BUILD CONFIG END #
+  ####################
+
+	if( $is_valid )
+	{
+		if ($scantype eq "meta_agent" || $scantype eq "post_agent")
+		{
+			$|=1;
+			STDOUT->autoflush(1); #no effect
+			print "<heading>Deploying a Metasploit Agent Filesystem Scan</heading><br><br>\n";
+			print "<table class=sample><tr><td>Do not close or leave this window until all scanners are deployed!</td></tr></table><br><br>\n";
+
+			print "<table class=sample><tr><td>General scan information</td></tr><tr><td>\n";
+			print "Scan name: $scanname<br>\n";
+			print "Profile: $profile<br>\n";
+			print "Scan type: $scantype<br>\n";
+			print "Sessions: $systems<br>\n";
+			print "Concurrent: $concurrent<br>\n";
+			print "</td></tr></table><br><br>\n";
+      
+			# This is where config was built previously. (it's now built above)   
+			STDOUT->autoflush(1);
+			# connect and login
+			my $metaSploiter = MetaSploiter->new();			
+			$metaSploiter->SetLatency($metaLatency);
+			$metaSploiter->SetTimeout($metatimeout);
+			#$metaSploiter->SetLogging(1);		
+			print "Logging $metauser onto $metahost:$metaport.<br>\n";
+			if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+			  print $metaSploiter->GetLastError() . "<br>\n";
+			  exit(0);
+			}						
+			print "Retrieving List of exploited sessions: ";
+			if ($ret_code = $metaSploiter->ListSessions()) {
+			  print $metaSploiter->GetLastError() . "<br>\n";
+			  exit(0);
+			}
+						
+			my @sessionList = $metaSploiter->GetSessionList();
+			my $sessionListLen = scalar(@sessionList);
+			print "$sessionListLen sessions found.<br>\n";
+			
+			#These are the target systems, a subset of the full session list.
+			my @targetSessions = split ("\n", $systems); #todo: split on space (gets all whitespace), and commas.
+			my $targetsLeft = scalar(@targetSessions);
+		    
+	    #trim crlfs from targetSession list.
+	    for (my $i = 0; $i < scalar(@targetSessions); $i++) {
+	      $targetSessions[$i] =~ s/\r$//g;
+	      $targetSessions[$i] =~ s/\n$//g;
+	    }
+	    
+	    if ($targetSessions[0] eq "all" || $targetSessions[0] eq "ALL" || $targetSessions[0] eq "All") {
+	      print "Targeting all found sessions.<br>\n";
+	      undef @targetSessions;
+	      foreach my $s (@sessionList) {
+	        push(@targetSessions, $s->sessionName);	        
+	      }
+	      $targetsLeft = scalar(@targetSessions);
+	    }	    
+      #done with this instance of MetaSploiter
+	    
+	    my $detailed = 0; # include details in successful results.
+			STDOUT->autoflush(1);	    
+			
+			if ($scantype eq "meta_agent") {
+			Proc::Queue::size($concurrent); 
+			foreach my $session(@sessionList) {
+        $|=1;
+	
+				if ($targetsLeft <= 0)  { last; }
+        if (grep {$_ eq $session->sessionName} @targetSessions) { # if (@targetSessions.indexOf($session->sessionName) != -1)
+          $targetsLeft--;
+                     
+          my $f = fork;
+          if( defined ($f) and $f == 0 ) {
+            # Need a new metaSploiter in each loop for concurrent processing to work! If we reuse the old one 
+            # gives all sorts of problems!
+            # todo: Try passing the auth token to the new instance instead of logging in again?
+            my $ret_code = 0;
+            my $sessionName = $session->sessionName; # Set these inside the loop, otherwise value changes outside fork
+            #my $systemIp   = $session->target_host;
+            my $systemIp    = $session->tunnel_peer;
+            
+            my $printme = "";
+            my $metaSploiter2 = MetaSploiter->new();	# Need a new metaSploiter in each fork 
+            print "Session $sessionName ($systemIp): Trying to deploy ($targetsLeft systems remain in queue)<br>\n";
+                                                           
+            $metaSploiter2->SetLatency($metaLatency);
+            $metaSploiter2->SetTimeout($metatimeout);
+            #$metaSploiter2->SetLogging(1);
+            $printme .= ">>> Re-Connecting to Metasploit and logging on $metauser.<br>\n";
+            if ($ret_code = $metaSploiter2->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+              print "Session $sessionName ($systemIp): Error logging back onto MetaSploit.<br>\n";
+              #print $metaSploiter2->GetLastError() . "<br>\n";
+              exit(0);
+            }     
+            if ($metaSploiter2->AcquirePersistentToken()) {
+              print "Session $sessionName ($systemIp): Error acquiring persistent token.<br>\n";
+              #print $metaSploiter2->GetLastError() . "<br>\n";
+              exit(0);
+            }                      
+                        
+            $metaSploiter2->MeterpreterRead($sessionName); # read (and discard) any waiting messages.
+            if ($ret_code = $metaSploiter2->SendAndWait($sessionName, "getsystem")) {              
+              print "Session $sessionName ($systemIp): Could not get system, insufficent permissions to deploy to this target.<br>\n";
+              print "Error returned: " . $metaSploiter2->GetLastError . "<br>\n";
+              exit (0);
+            }            
+            $printme .= ">>> Got system.<br>\n";
+            
+            # only create the directory if it does not exist
+            # OpenDLP will recursively delete the directory when all scanning is done
+            # If users use "c:\windows" as the install directory, this would be a
+            # very bad thing
+            $printme .= ">>> Creating \"$path\" <br>\n";     
+            
+            $ret_code = $metaSploiter2->CreateRemotePath($sessionName, $path);  #creates AND changes to this path.
+            if ($ret_code) {
+              if ($ret_code == 1) {							                
+                print "Session $sessionName ($systemIp): Directory already exists on target system. Skipping deployment and scan attempt for this target.<br>\n";
+                exit(0);
+                #$printme .= "WARNING - Directory already exists on target system. Continuing anyways.<br>\n";
+                #print "Session $sessionName ($systemIp): WARNING - Directory already exists on target system. Continuing anyways.<br>\n";
+              } else {
+                print "Session $sessionName ($systemIp): Error creating target directory. Skipping deployment and scan attempt for this target.<br>\n";
+                print "Metasploit response: " . $metaSploiter2->GetLastError() . "<br>\n";
+                exit(0);	  	
+              }
+            }
+            my $path2 = $path;
+            $path2 =~ s/\\/\//g; # replaces backslash with forward slash
+            if ($metaSploiter2->ChangeRemotePath($sessionName, $path2)) { #just to make sure
+              print "Session $sessionName ($systemIp): Target directory not created. Terminating scan.<br>\n";
+              exit(0);  # because we don't want to start uploading files to an unknown location!
+            }
+            
+            # copy config.ini to installation directory
+            # Unlike smb, the metasploit RPC does not have the ability to write a string into a file.
+            # So, I created a small C++ app called StrFile.exe, that I upload first. It takes two params, 
+            # the base-64-encoded string (all on one line with no crlfs), and a filename. (If no filename 
+            # is provided, it writes to stdout). Then just base-64 encode the config data and execute
+            # the file with the b64 data as the first param.
+            
+            # Note we can't just create a file, save it and then upload it, because the system running 
+            # OpenDLP is not necessarially the system running metasploit. So localPath on the metasploit
+            # system is NOT the same local path for OpenDLP.
+            
+            my $tracker = "";
+            my $config_copy = $config;
+            $config_copy .= "\n# Random string used for host tracking purposes.\n";
+            $config_copy .= "tracker=";
+            my @chars = ( 'A'..'F','0'..'9' );
+            srand();
+            foreach( 1..32 ) {
+              my $rand_char = $chars[rand @chars];
+              $config_copy .= $rand_char;
+              $tracker .= $rand_char;
+            }
+            $printme .= ">>> Setting local path to \"$metaSourcePath\".<br>\n";
+            if ($metaSploiter2->ChangeLocalPath($sessionName, $metaSourcePath) != 0) {  #directory on metasploit system where OpenDLP binaries are stored.
+              $printme .= $metaSploiter2->GetLastError() . "<br>\n";
+              $printme .= "Unable to set local path: " . $metaSploiter2->GetLastError() . "<br>\n";
+              $printme .= "Terminating scan attempt<br>\n";
+              exit(0);
+              #last;
+            }
+            if ($metaSploiter2->UploadFile($sessionName, "StrFile.exe") == 0) { #overwrites without asking
+              $printme .= ">>> Copied StrFile.exe file<br>\n";              
+            } else {
+              $printme .= $metaSploiter2->GetLastError() ."<br>\n";
+              $printme .= "Terminating scan attempt<br>\n";
+              exit (0);
+              #last;
+            }					
+            $config_copy = encode_base64($config_copy);
+            $config_copy =~ s/\r|\n//g;   #strips out \r\n, so the b64 data is all on one line
+
+            # to be safe, copy sc.exe to installation directory
+            # The localpath is already set to $metaSourcePath above.
+            #$metaSploiter2->SetLocalPath($sessionName, $metaSourcePath); 
+            if ($metaSploiter2->UploadFile($sessionName, "sc.exe") == 0) { #overwrites without asking
+              $printme .= ">>> Copied sc.exe file<br>\n";
+            } else {
+              $printme .= "Error copying sc.exe: " . $metaSploiter2->GetLastError() ."<br>\n";
+            }				
+            
+            if ($metaSploiter2->RemoteExecute($sessionName, "StrFile.exe", $config_copy . " config.ini") == 0) { #overwrites without asking
+              $printme .= ">>> Generated config.ini file<br>\n";
+            } else {
+              print "Session $sessionName ($systemIp): Error generating config.ini" . $metaSploiter2->GetLastError() . "<br>\n";              
+              print "Terminating scan attempt<br>\n";
+              exit(0);
+              #last;
+            }       	
+                    
+            # copy self-extracting zip file with OpenDLP and DLLs to installation directory
+            if ($metaSploiter2->UploadFile($sessionName, "OpenDLPz.exe") == 0) { #overwrites without asking
+              $printme .= ">>> Copied OpenDLPz.exe file<br>\n";
+            } else {
+              $printme .= "Error copying OpenDLPz.exe: " . $metaSploiter2->GetLastError() ."<br>\n";
+            }					
+            
+            # copy client.pem
+            if ($metaSploiter2->UploadFile($sessionName, "client.pem") == 0) { #overwrites without asking
+              $printme .= ">>> Copied client.pem file<br>\n";
+            } else {
+              $printme .= "Error copying client.pem: " . $metaSploiter2->GetLastError() ."<br>\n";
+            }			
+
+            # copy server.pem
+            if ($metaSploiter2->UploadFile($sessionName, "server.pem") == 0) { #overwrites without asking
+              $printme .= ">>> Copied server.pem file<br>\n";
+            } else {
+              $printme .= "Error copying server.pem: " . $metaSploiter2->GetLastError() ."<br>\n";              
+            }			
+                
+           
+            # no way to send a del *.* or a recursive rmdir commnand via metasploit. At least, 
+            # not without opening a command shell. 
+            # todo: Should I put the sc stop OpenDLP and sc delete OpenDLP in here too?
+            $printme .= ">>> Uploading removal script.<br>\n";
+            $batchfile = encode_base64("cd ..\nrmdir /S /Q \"$path\"\n");
+            $batchfile =~ s/\r|\n//g;  #strips out \r\n, so the b64 data is all on one line
+            $metaSploiter2->RemoteExecute($sessionName, "StrFile.exe", $batchfile . " remove.bat");
+         
+            $printme .= ">>> Extract OpenDLPz.exe<br>\n";
+            $metaSploiter2->RemoteExecuteAndReadChannel($sessionName, "OpenDLPz.exe", "x", "-y");                   
+            $output = $metaSploiter2->GetCommandResponse();
+            $output =~ s/\n/<br>/g;
+            
+            if (index(lc($output), "everything is ok") != -1) { 
+              $printme .= ">>> OpenDLPz extraction successful.<br>\n";
+              if ($detailed) { $printme .= $output; }
+            } else {              
+              $printme .= "OpenDLPz Extraction failed: <br>$output<br>";
+            }
+            
+            print "Session $sessionName ($systemIp): Attempting to start OpenDLP Service.<br>\n";
+            
+            $printme .= ">>> Creating OpenDLP service.<br>\n";
+            # create OpenDLP service (will use $description in future version)
+            # metasploit console strips quotes out of parameters, so this is going to fail. 
+            # I'm either going to have to write a batch file via strfile.exe or open a shell
+            # and execute dos commands.                                 
+            
+            # sc.exe is EXTREMELY touchy about the command line. It *REQUIRES* the path be c:\Program Files\OpenDLP\OpenDLP.exe
+            # instead of c:/Program Files/OpenDLP/OpenDLP.exe. There is not a way I can send backslashes 
+            # via RemoteExecute, the underlying perl/ruby code strips them out, no matter how many are marked up.
+            # So I'm creating a batch file and running it instead. Very simple solution to a problem that has wasted
+            # hours if not days of my time.  Here is the original code:
+            #   $path =~ s/\\/\//g; # replaces backslash with forward slash
+            #   $metaSploiter2->RemoteExecuteAndReadChannel($sessionName, "sc.exe", "create", "OpenDLP", "binPath=", "$path/OpenDLP.exe", "start=", "auto");
+            # The following three lines replace the above two.  
+        
+            $printme .= ">>> Uploading createService script<br>\n";
+            my $batchfile = encode_base64("sc.exe create OpenDLP binpath= \"$path\\OpenDLP.exe\" start= auto\n");
+            $batchfile =~ s/\r|\n//g;  #strips out \r\n, so the b64 data is all on one line
+            $metaSploiter2->RemoteExecute($sessionName, "StrFile.exe", $batchfile . " createService.bat");
+            $printme .= ">>> Executing createService script.<br>\n";
+            $metaSploiter2->RemoteExecuteAndReadChannel($sessionName, "createService.bat");
+            
+            $output = $metaSploiter2->GetCommandResponse();
+            if ($output =~ /SUCCESS/) {
+              $printme .= ">>> OpenDLP service created successfully.<br>\n";
+              if ($detailed) { $printme .= $output; }
+            } else {
+              $output =~ s/\n/<br>/g;            
+              $printme .= "Error creating OpenDLP service: <br>\n$output";
+            }
+            
+            # sleep a bit to allow Windows to regain normalcy
+            sleep(3);
+
+            # start OpenDLP service
+            $printme .= ">>> Starting openDLP service.<Br>\n";
+            $metaSploiter2->RemoteExecuteAndReadChannel($sessionName, "sc.exe", "start", "OpenDLP");
+            $output = $metaSploiter2->GetCommandResponse();
+            $output =~ s/\n/<br>/g;
+            
+            my $is_deployed = 0;
+            if( $output =~ /START_PENDING/ || $ouput =~ /RUNNING/) {
+              $is_deployed = 1;
+              $printme .= ">>> OpenDLP Started<br>\n";
+              if ($detailed) { $printme .= $output; }
+            } else {
+              $printme .= "Error starting OpenDLP service: <br>\n$output<br>\n";
+            }
+            $metaSploiter2->ChangeRemotePath($sessionId, "/");  #otherwise the current directory will be locked.
+            
+            # INSERT ip, updated, status, tracker, profile, scantype INTO systems;
+            my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+            my $string = "INSERT into systems SET scan=?,sessionid=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+            my $sth2 = $dbh2->prepare( $string );
+            my $localtime = time();
+            $printme .= ">>> Populating database with system information<br>\n";
+            
+            $sth2->execute( $scanname, $sessionName, getIpFromPeer($systemIp), '-1', $localtime, $tracker, $profile, "running", $scantype );
+            $sth2->finish();
+            $dbh2->disconnect();
+            if( $is_deployed ) {
+              print "Session $sessionName ($systemIp): OpenDLP deployed and started<br>\n";
+            } else {
+              print "Session $sessionName ($systemIp): Possible error starting OpenDLP, check scan results when done deploying all agents here<br>\n";
+            }
+            #output status of deployment
+   					print "<table border=1><tr><td>Deployment information for meterpreter session $sessionName ($systemIp):</td></tr><tr><td>$printme</td></tr></table><br><br>";
+            
+            $metaSploiter2->ReleasePersistentToken();
+            exit(0);     
+          } #if( defined ($f) and $f == 0 )
+          1 while waitpid(-1, WNOHANG) > 0;
+				} #if (grep {$_ eq $sessionName} @targetSessions 
+			
+			}  #foreach my $session(@sessionList) 
+			} elsif ($scantype eq "post_agent") {
+        Proc::Queue::size($concurrent); 
+        foreach my $session(@sessionList) {
+          $|=1;
+            
+          if ($targetsLeft <= 0)  { last; }     
+          if (grep {$_ eq $session->sessionName} @targetSessions) { # if (@targetSessions.indexOf($session->sessionName) != -1)
+            $targetsLeft--;
+                       
+            my $f = fork;
+            if( defined ($f) and $f == 0 ) {
+              # Need a new metaSploiter in each loop for concurrent processing to work! If we reuse the old one 
+              # gives all sorts of problems!
+              # todo: Try passing the auth token to the new instance instead of logging in again?
+              my $ret_code = 0;
+              my $sessionName = $session->sessionName; # Set these inside the loop, otherwise value changes outside fork
+              #my $systemIp   = $session->target_host;
+              my $systemIp    = $session->tunnel_peer;
+              my $printme = "";
+              my $metaPostModule = MetaPostModule->new();	# Need a new metaSploiter in each fork 
+              print "Session $sessionName ($systemIp): Trying to deploy ($targetsLeft systems remain in queue)<br>\n";
+                                                             
+              $metaPostModule->SetLatency($metaLatency);
+              $metaPostModule->SetTimeout($metatimeout);
+              #$metaPostModule->SetLogging(1);
+              $printme .= ">>> Re-Connecting to Metasploit and logging on $metauser.<br>\n";
+              if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {       
+                print "Session $sessionName ($systemIp): Error logging back onto MetaSploit.<br>\n";
+                #print $metaPostModule->GetLastError() . "<br>\n";
+                exit(0);
+              }       
+              $printme .= ">>> Checking for \"windows/gather/opendlp\" module.<br>\n";       
+              $metaPostModule->SetModuleName("windows/gather/opendlp");
+              if ($ret_code = $metaPostModule->CheckForModule() ) {
+                print "Module \"windows/gather/opendlp\" is not installed on the Metasploit host. Terminating deployment.<BR>\n";
+                exit(0);
+              }     
+              if ($metaPostModule->AcquirePersistentToken()) {
+                print "Session $sessionName ($systemIp): Error acquiring persistent token.<br>\n";
+                #print $metaPostModule->GetLastError() . "<br>\n";
+                exit(0);
+              }                      
+               
+                
+              
+              my $tracker = "";
+              my $config_copy = $config;
+              $config_copy .= "\n# Random string used for host tracking purposes.\n";
+              $config_copy .= "tracker=";
+              srand();
+              my @chars = ( 'A'..'F','0'..'9' );
+              foreach( 1..32 ) {
+                my $rand_char = $chars[rand @chars];
+                $config_copy .= $rand_char;
+                $tracker .= $rand_char;
+              } 
+              $config_copy = encode_base64($config_copy);
+              $config_copy =~ s/\r|\n//g;   #strips out \r\n, so the b64 data is all on one line
+
+              $metaPostModule->SetSourcePath($metaSourcePath);            
+              $metaPostModule->SetRemotePath($path);
+              $metaPostModule->SetConfigString($config_copy);
+              $metaPostModule->SetSessionId($sessionName);              
+              $ret_code =$metaPostModule->DeployOpenDLP();
+                
+              my $output = $metaPostModule->GetCommandResponse();
+              $output =~ s/\n/<br>/g;            
+              
+              my $is_deployed = 0;
+              if($ret_code == 0) {
+                $is_deployed = 1;                
+                $printme .= $output;
+                #$printme .= ">>> OpenDLP Started<br>\n";              
+              } else {
+                $printme .= "Error starting OpenDLP service: <br>\n" . $metaPostModule->GetLastError() . "<br>\n";
+                
+                $printme .= "Log: <Br>$output<BR>\n";
+              }
+              
+              
+              # INSERT ip, updated, status, tracker, profile, scantype INTO systems;
+              my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+              my $string = "INSERT into systems SET scan=?,sessionid=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+              my $sth2 = $dbh2->prepare( $string );
+              my $localtime = time();
+              $printme .= ">>> Populating database with system information<br>\n";
+              
+              $sth2->execute( $scanname, $sessionName, getIpFromPeer($systemIp), '-1', $localtime, $tracker, $profile, "running", $scantype );
+              $sth2->finish();
+              $dbh2->disconnect();
+              if( $is_deployed ) {
+                print "Session $sessionName ($systemIp): OpenDLP deployed and started<br>\n";
+              } else {
+                print "Session $sessionName ($systemIp): Possible error starting OpenDLP, check scan results when done deploying all agents here<br>\n";
+              }
+              #output status of deployment
+              print "<table border=1><tr><td>Deployment information for meterpreter session $sessionName ($systemIp):</td></tr><tr><td>$printme</td></tr></table><br><br>";
+              
+              $metaPostModule->ReleasePersistentToken();
+              exit(0);     
+            } #if( defined ($f) and $f == 0 )
+            1 while waitpid(-1, WNOHANG) > 0;
+          } #if (grep {$_ eq $sessionName} @targetSessions 
+        }  #foreach my $session(@sessionList) 
+			
+			} else { print "Error parsing scan type."; } # should never happen
+			if ($targetsLeft > 0) {
+			  print "$targetsLeft target sessions were not found on the metasploit system, and could not be deployed to.<br>\n";
+			}
+						
+		} #if ($scantype eq "meta_agent" )
+
+
+
+		elsif( $scantype eq "win_agent" )
+		{
+			print "<heading>Deploying a Windows Agent Filesystem Scan</heading><br><br>\n";
+			print "<table class=sample><tr><td>Do not close or leave this window until all scanners are deployed!</td></tr></table><br><br>\n";
+
+			print "<table class=sample><tr><td>General scan information</td></tr><tr><td>\n";
+			print "Scan name: $scanname<br>\n";
+			print "Profile: $profile<br>\n";
+			print "Systems: $systems<br>\n";
+			print "Concurrent: $concurrent<br>\n";
+			print "</td></tr></table><br><br>\n";
+
+			# This is where config was built previously. (it's now built above)
+
+			# If smbhash is not blank, set the environment variable SMBHASH
+			# to hold the value that will be passed to the host
+			my $smb = "";
+			if( $smbhash ne "" )
+			{
+				$ENV{'SMBHASH'} = $smbhash;
+				$smb = new Filesys::SmbClient( username => $username,
+					workgroup => $domain
+					);
+			}
+			else
+			{
+				$smb = new Filesys::SmbClient( username => $username,
+					password => $password,
+					workgroup => $domain,
+				);
+			}
+
+			my @list_of_systems = split( "\n", $systems );
+			my $length_of_systems = @list_of_systems;
+			Proc::Queue::size($concurrent);
+			foreach my $system( @list_of_systems )
+			{
+				$system =~ s/\r$//g;
+				$system =~ s/\n$//g;
+				$length_of_systems--;
+
+				my $f = fork;
+				if( defined ($f) and $f == 0 )
+				{
+					print "$system: Trying to deploy ($length_of_systems systems remain in queue)<br>\n";
+					my $printme = "";
+
+					# stat installation directory
+					my @directories = split( /\\/, $path );
+					my $built_dir = "smb://$system/" . substr($directories[0],0,1 ) . "\$/";
+					my $length_directories = @directories;
+					my $x = "";
+					my $fd = "";
+					for( $x = 1; $x < $length_directories; $x++ )
+					{
+						$built_dir .= $directories[$x] . "/";
+					}
+
+					# only create the directory if it does not exist
+					# OpenDLP will recursively delete the directory when all scanning is done
+					# If users use "c:\windows" as the install directory, this would be a
+					# very bad thing
+					my @stat_smb = $smb->stat( $built_dir );
+					if( $#stat_smb == 0 )
+					{
+						# build installation directory if it does not exist
+						my $built_dir = "smb://$system/" . substr($directories[0],0,1 ) . "\$/";
+						my $length_directories = @directories;
+						my $x = "";
+						my $fd = "";
+						for( $x = 1; $x < $length_directories; $x++ )
+						{
+							$built_dir .= $directories[$x] . "/";
+							if( ($smb->mkdir( $built_dir, '0600' )) == 0 )
+							{
+								$printme .= $! . "<br>\n";
+							}
+						}
+					}
+					else
+					{
+						print "$system: Directory already exists, terminating deployment and scan attempt<br>\n";
+						exit(0);
+					}
+
+					# copy config.ini to installation directory
+					my $file = $built_dir . "config.ini";
+					my @stat_smb = $smb->stat( $file );
+					my $tracker = "";
+					if( $#stat_smb == 0 )
+					{
+						my $fd = $smb->open( ">$file", 0600 );
+						my $config_copy = $config;
+						$config_copy .= "\n# Random string used for host tracking purposes.\n";
+						$config_copy .= "tracker=";
+						my @chars = ( 'A'..'F','0'..'9' );
+						srand();
+						foreach( 1..32 )
+						{
+							my $rand_char = $chars[rand @chars];
+							$config_copy .= $rand_char;
+							$tracker .= $rand_char;
+						}
+						if( ($smb->write( $fd, $config_copy )) < 0 )
+						{
+							$printme .= $! . "<br>\n";
+						}
+						$smb->close($fd);
+						$printme .= ">>> Copied config.ini file<br>\n";
+					}
+					else
+					{
+						$printme .= ">>> File \"$file\" already exists. The original file was left untouched and nothing was copied. Perhaps a scan is already running on this system?<br>\n";
+					}
+
+					# to be safe, copy sc.exe to installation directory
+					my $file = $built_dir . "sc.exe";
+					my @stat_smb = $smb->stat( $file );
+					if( $#stat_smb == 0 )
+					{
+						my $fd = $smb->open( ">$file", 0600 );
+						my @stat_info = stat( $sc_path );
+						my $sc_filesize = $stat_info[7];
+						open( SC, $sc_path );
+						binmode( SC );
+						my $sc_file = "";
+						read( SC, $sc_file, $sc_filesize );
+						if( ($smb->write( $fd, $sc_file )) < 0 )
+						{
+							$printme .= $! . "<br>\n";
+						}
+						if($fd) { $smb->close( $fd ); }
+						$printme .= ">>> Copied sc.exe file<br>\n";
+					}
+					else
+					{
+						$printme .= "File \"$file\" already exists. The original file was left untouched and nothing was copied. Perhaps a scan is already running on this system?<br>\n";
+					}
+
+					# copy self-extracting zip file with OpenDLP and DLLs to installation directory
+					my $file = $built_dir . "OpenDLPz.exe";
+					my @stat_smb = $smb->stat( $file );
+					if( $#stat_smb == 0 )
+					{
+						my $fd = $smb->open( ">$file", 0600 );
+						my @stat_info = stat( $OpenDLPz_path );
+						my $OpenDLPz_filesize = $stat_info[7];
+						open( OpenDLPz, $OpenDLPz_path );
+						binmode( OpenDLPz );
+						my $OpenDLPz_file = "";
+						read( OpenDLPz, $OpenDLPz_file, $OpenDLPz_filesize );
+						if( ($smb->write( $fd, $OpenDLPz_file )) < 0 )
+						{
+							$printme .= $! . "<br>\n";
+						}
+						if($fd) { $smb->close( $fd ); }
+						$printme .= ">>> Copied OpenDLPz.exe file<br>\n";
+					}
+					else
+					{
+						$printme .= "File \"$file\" already exists. The original file was left untouched and nothing was copied. Perhaps a scan is already running on this system?<br>\n";
+					}
+
+					# copy client.pem
+					my $file = $built_dir . "client.pem";
+					my @stat_smb = $smb->stat( $file );
+					if( $#stat_smb == 0 )
+					{
+						my $fd = $smb->open( ">$file", 0600 );
+						my @stat_info = stat( $client_pem_path );
+						my $client_pem_filesize = $stat_info[7];
+						open( client_pem, $client_pem_path );
+						binmode( client_pem );
+						my $client_pem_file = "";
+						read( client_pem, $client_pem_file, $client_pem_filesize );
+						if( ($smb->write( $fd, $client_pem_file )) < 0 )
+						{
+							print $! . "<br>\n";
+						}
+						if($fd) { $smb->close( $fd ); }
+						$printme .= ">>> Copied client.pem file<br>\n";
+					}
+					else
+					{
+						$printme .= ">>> File \"$file\" already exists. The original file was left untouched and nothing was copied. Perhaps a scan is already running on this system?<br>\n";
+					}
+
+					# copy server.pem
+					my $file = $built_dir . "server.pem";
+					my @stat_smb = $smb->stat( $file );
+					if( $#stat_smb == 0 )
+					{
+						my $fd = $smb->open( ">$file", 0600 );
+						my @stat_info = stat( $server_pem_path );
+						my $server_pem_filesize = $stat_info[7];
+						open( server_pem, $server_pem_path );
+						binmode( server_pem );
+						my $server_pem_file = "";
+						read( server_pem, $server_pem_file, $server_pem_filesize );
+						if( ($smb->write( $fd, $server_pem_file )) < 0 )
+						{
+							$printme .= $! . "<br>\n";
+						}
+						if($fd) { $smb->close( $fd ); }
+						$printme .= ">>> Copied server.pem file<br>\n";
+					}
+					else
+					{
+						$printme .= ">>> File \"$file\" already exists. The original file was left untouched and nothing was copied. Perhaps a scan is already running on this system?<br>\n";
+					}
+
+					my $escape_user = "";
+					my $length_user = length( $username );
+					my $x = 0;
+					for( $x = 0; $x < $length_user; $x++ )
+					{
+						$escape_user .= "\\" . substr( $username, $x, 1 );
+					}
+
+					my $escape_pass = "";
+					my $length_pass = length( $password );
+					my $x = 0;
+					for( $x = 0; $x < $length_pass; $x++ )
+					{
+						$escape_pass .= "\\" . substr( $password, $x, 1 );
+					}
+
+					# extract OpenDLPz.exe
+					$printme .= ">>> Creating OpenDLP service<br>\n";
+					my $command = "winexe --user=\'$domain\'\\$escape_user --password=$escape_pass //$system \'\"$path\\OpenDLPz.exe\" x -y -o\"$path\"\'";
+					$output = `$command`;
+					$output =~ s/\n/<br>/g;
+					$printme .= $output;
+
+					# create OpenDLP service (will use $description in future version)
+					my $command = "winexe --user=\'$domain\'\\$escape_user --password=$escape_pass //$system \'\"$path\\sc.exe\" create OpenDLP binpath= \"$path\\OpenDLP.exe\" start= auto\'";
+					my $output = `$command`;
+					$output =~ s/\n/<br>/g;
+					$printme .= $output;
+
+					# sleep a bit to allow Windows to regain normalcy
+					sleep(3);
+
+					# start OpenDLP service
+					my $command = "winexe --user=\'$domain\'\\$escape_user --password=$escape_pass //$system \'\"$path\\sc.exe\" start OpenDLP\'";
+					my $output = `$command`;
+					$output =~ s/\n/<br>/g;
+					my $is_deployed = 0;
+					if( $output =~ /START_PENDING/ )
+					{
+						$is_deployed = 1;
+					}
+					$printme .= ">>> Starting OpenDLP service<br>\n";
+					$printme .= $output;
+
+					# INSERT ip, updated, status, tracker, profile, scantype INTO systems;
+					my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+					my $string = "INSERT into systems SET scan=?,domain=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+					my $sth2 = $dbh2->prepare( $string );
+					my $localtime = time();
+					$printme .= ">>> Populating database with system information<br>\n";
+					$sth2->execute( $scanname, $domain, $system, '-1', $localtime, $tracker, $profile, "running", $scantype );
+					$sth2->finish();
+					$dbh2->disconnect();
+					if( $is_deployed )
+					{
+						print "$system: OpenDLP deployed and started<br>\n";
+					}
+					else
+					{
+						print "$system: Possible error starting OpenDLP, check scan results when done deploying all agents here<br>\n";
+					}
+
+#					print "<table border=1><tr><td>Deployment information for $system</td></tr><tr><td>$printme</td></tr></table><br><br>";
+					exit(0);
+				}
+				1 while waitpid(-1, WNOHANG) > 0;
+			}
+		} #scantype = win_agent
+
+
+
+		elsif( $scantype =~ /^(win_agentless)$/ )
+		{
+			print "<heading>Deploying a Windows Agentless Filesystem Scan</heading><br><br>\n";
+			print "<table class=sample><tr><td>Do not close or leave this window until all scanners are deployed!</td></tr></table><br><br>\n";
+
+			print "<table class=sample><tr><td>General scan information</td></tr><tr><td>\n";
+			print "Scan name: $scanname<br>\n";
+			print "Profile: $profile<br>\n";
+			print "Systems: $systems<br>\n";
+			print "Concurrent: $concurrent<br>\n";
+			print "</td></tr></table><br><br>\n";
+
+			my @list_of_systems = split( "\n", $systems );
+			my $length_of_systems = @list_of_systems;
+			Proc::Queue::size($concurrent);
+			foreach my $system( @list_of_systems )
+			{
+				$system =~ s/\r$//g;
+				$system =~ s/\n$//g;
+				$length_of_systems--;
+
+				my $f = fork;
+				if( defined ($f) and $f == 0 )
+				{
+					print "$system: Trying to deploy ($length_of_systems systems remain in queue)<br>\n";
+
+					my $tracker = "";
+					my @chars = ( 'A'..'F','0'..'9' );
+					srand();
+					foreach( 1..32 )
+					{
+						my $rand_char = $chars[rand @chars];
+						$config_copy .= $rand_char;
+						$tracker .= $rand_char;
+					}
+
+					`$agentless_bin_file \"$profile\" $system $tracker \"$scanname\" > /dev/null &`;
+					print "$system: Child agentless scanning process started. Check <a href=\"logs.html?scanname=$scanname\">logs</a> for errors.<br>\n";
+
+
+					# INSERT ip, updated, status, profile, tracker, scantype INTO systems;
+					my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+					my $string = "INSERT into systems SET scan=?,domain=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+					my $sth2 = $dbh2->prepare( $string );
+					my $localtime = time();
+					$printme .= ">>> Populating database with system information<br>\n";
+					$sth2->execute( $scanname, $domain, $system, '-1', $localtime, $tracker, $profile, "running", $scantype );
+					$sth2->finish();
+					$dbh2->disconnect();
+					exit(0);
+				}
+				1 while waitpid(-1, WNOHANG) > 0;
+			}
+		} # scantype = win_agentless
+
+
+
+		elsif( $scantype =~ /^(win_share)$/ )
+		{
+			print "<heading>Deploying a Windows Share Scan</heading><br><br>\n";
+			print "<table class=sample><tr><td>Do not close or leave this window until all scanners are deployed!</td></tr></table><br><br>\n";
+
+			print "<table class=sample><tr><td>General scan information</td></tr><tr><td>\n";
+			print "Scan name: $scanname<br>\n";
+			print "Profile: $profile<br>\n";
+			my $systems_printme = $systems;
+			$systems_printme = replacechars( $systems_printme );
+			print "Systems: $systems_printme<br>\n";
+			print "Concurrent: $concurrent<br>\n";
+			print "</td></tr></table><br><br>\n";
+
+			my @list_of_systems = split( "\n", $systems );
+			my $length_of_systems = @list_of_systems;
+			Proc::Queue::size($concurrent);
+			foreach my $system( @list_of_systems )
+			{
+				$system =~ s/\r$//g;
+				$system =~ s/\n$//g;
+				$length_of_systems--;
+
+				my $f = fork;
+				if( defined ($f) and $f == 0 )
+				{
+					my $system_printme = $system;
+					$system_printme = replacechars( $system_printme );
+					print "$system_printme: Trying to deploy ($length_of_systems systems remain in queue)<br>\n";
+
+					my $tracker = "";
+					my @chars = ( 'A'..'F','0'..'9' );
+					srand();
+					foreach( 1..32 )
+					{
+						my $rand_char = $chars[rand @chars];
+						$config_copy .= $rand_char;
+						$tracker .= $rand_char;
+					}
+
+					my $escape_system = "";
+					my $length_system = length( $system );
+					my $x = 0;
+					for( $x = 0; $x < $length_system; $x++ )
+					{
+						$escape_system .= "\\" . substr( $system, $x, 1 );
+					}
+
+					`$agentless_bin_file \"$profile\" $escape_system $tracker \"$scanname\" > /dev/null &`;
+					print "$system_printme: Child agentless scanning process started. Check <a href=\"logs.html?scanname=$scanname\">logs</a> for errors.<br>\n";
+
+
+					# INSERT ip, updated, status, profile, tracker, scantype INTO systems;
+					my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+					my $string = "INSERT into systems SET scan=?,domain=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+					my $sth2 = $dbh2->prepare( $string );
+					my $localtime = time();
+					$printme .= ">>> Populating database with system information<br>\n";
+					$sth2->execute( $scanname, $domain, $system, '-1', $localtime, $tracker, $profile, "running", $scantype );
+					$sth2->finish();
+					$dbh2->disconnect();
+					exit(0);
+				}
+				1 while waitpid(-1, WNOHANG) > 0;
+			}
+		} # scantype = win_share
+
+
+
+		elsif( $scantype =~ /^(unix_agentless)$/ )
+		{
+			print "<heading>Deploying a UNIX Agentless Filesystem Scan</heading><br><br>\n";
+			print "<table class=sample><tr><td>Do not close or leave this window until all scanners are deployed!</td></tr></table><br><br>\n";
+
+			print "<table class=sample><tr><td>General scan information</td></tr><tr><td>\n";
+			print "Scan name: $scanname<br>\n";
+			print "Profile: $profile<br>\n";
+			print "Systems: $systems<br>\n";
+			print "Concurrent: $concurrent<br>\n";
+			print "</td></tr></table><br><br>\n";
+
+			my @list_of_systems = split( "\n", $systems );
+			my $length_of_systems = @list_of_systems;
+			Proc::Queue::size($concurrent);
+			foreach my $system( @list_of_systems )
+			{
+				$system =~ s/\r$//g;
+				$system =~ s/\n$//g;
+				$length_of_systems--;
+
+				my $f = fork;
+				if( defined ($f) and $f == 0 )
+				{
+					print "$system: Trying to deploy ($length_of_systems systems remain in queue)<br>\n";
+
+					my $tracker = "";
+					my @chars = ( 'A'..'F','0'..'9' );
+					srand();
+					foreach( 1..32 )
+					{
+						my $rand_char = $chars[rand @chars];
+						$config_copy .= $rand_char;
+						$tracker .= $rand_char;
+					}
+
+					`$agentless_unix_file \"$profile\" $system $tracker \"$scanname\" > /dev/null &`;
+					print "$system: Child agentless scanning process started. Check <a href=\"logs.html?scanname=$scanname\">logs</a> for errors.<br>\n";
+
+
+					# INSERT ip, updated, status, profile, tracker, scantype INTO systems;
+					my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+					my $string = "INSERT into systems SET scan=?,domain=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+					my $sth2 = $dbh2->prepare( $string );
+					my $localtime = time();
+					$printme .= ">>> Populating database with system information<br>\n";
+					$sth2->execute( $scanname, $domain, $system, '-1', $localtime, $tracker, $profile, "running", $scantype );
+					$sth2->finish();
+					$dbh2->disconnect();
+					exit(0);
+				}
+				1 while waitpid(-1, WNOHANG) > 0;
+			}
+		} # scantype = unix_agentless
+
+
+
+		elsif( $scantype =~ /^(mssql_agentless|mysql_agentless)$/ )
+		{
+			print "<heading>Deploying a Database Scan ($scantype)</heading><br><br>\n";
+			print "<table class=sample><tr><td>Do not close or leave this window until all scanners are deployed!</td></tr></table><br><br>\n";
+
+			print "<table class=sample><tr><td>General scan information</td></tr><tr><td>\n";
+			print "Scan name: $scanname<br>\n";
+			print "Profile: $profile<br>\n";
+			print "Systems: $systems<br>\n";
+			print "Concurrent: $concurrent<br>\n";
+			print "</td></tr></table><br><br>\n";
+
+			my @list_of_systems = split( "\n", $systems );
+			my $length_of_systems = @list_of_systems;
+			Proc::Queue::size($concurrent);
+			foreach my $system( @list_of_systems )
+			{
+				$system =~ s/\r$//g;
+				$system =~ s/\n$//g;
+				$length_of_systems--;
+
+				my $f = fork;
+				if( defined ($f) and $f == 0 )
+				{
+					print "$system: Trying to deploy ($length_of_systems systems remain in queue)<br>\n";
+
+					my $tracker = "";
+					my @chars = ( 'A'..'F','0'..'9' );
+					srand();
+					foreach( 1..32 )
+					{
+						my $rand_char = $chars[rand @chars];
+						$config_copy .= $rand_char;
+						$tracker .= $rand_char;
+					}
+
+					`$db_bin_file \"$profile\" \"$system\" $tracker \"$scanname\" > /dev/null &`;
+					print "$system: Child database scanning process started. Check <a href=\"logs.html?scanname=$scanname\">logs</a> for errors.<br>\n";
+
+
+					# INSERT ip, updated, status, profile, tracker, scantype INTO systems;
+					my $dbh2 = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+					my $string = "INSERT into systems SET scan=?,domain=?,ip=?,status=?,updated=?,tracker=?,profile=?,control=?,scantype=?;";
+					my $sth2 = $dbh2->prepare( $string );
+					my $localtime = time();
+					$printme .= ">>> Populating database with system information<br>\n";
+					$sth2->execute( $scanname, $domain, $system, '-1', $localtime, $tracker, $profile, "running", $scantype );
+					$sth2->finish();
+					$dbh2->disconnect();
+					exit(0);
+				}
+				1 while waitpid(-1, WNOHANG) > 0;
+			}
+		} # scantype = mysql_agentless or mssql_agentless
+	}
+
+
+	else
+	{
+		print "Could not get profile information. Ensure the profile exists and try to deploy your scan again.<br><br>\n";
+		$is_valid = 0;
+	}
+
+	$sth->finish();
+	$dbh->disconnect();
+}
+
+#footer();
+
+sub header
+{
+  $|=1;
+  STDOUT->autoflush(1); #no effect
+  
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+
+sub replacechars
+{
+	my $string = shift;
+
+	$string =~ s/\&/\&amp;/g;
+	$string =~ s/\#/&#35;/g;
+	$string =~ s/"/&#34;/g;
+	$string =~ s/\%/&#37;/g;
+	$string =~ s/\'/&#39;/g;
+	$string =~ s/\//&#47;/g;
+	$string =~ s/</&#60;/g;
+	$string =~ s/>/&#62;/g;
+	$string =~ s/\[/&#91;/g;
+	$string =~ s/\\/&#92;/g;
+	$string =~ s/\]/&#93;/g;
+	$string =~ s/`/&#96;/g;
+	$string =~ s/{/&#123;/g;
+	$string =~ s/\|/&#124;/g;
+	$string =~ s/}/&#125;/g;
+	$string =~ s/\(/&#40;/g;
+	$string =~ s/\)/&#41;/g;
+	$string =~ s/\n//g;
+	$string =~ s/\r//g;
+	$string =~ s/\ /&nbsp;/g;
+
+	return $string;
+}
+
+sub getIpFromPeer 
+{
+  my $peer = shift;
+  my $pos = index($peer, ":");
+  if ($pos == -1) { return $peer; }
+  else { return substr($peer, 0, $pos); }
+}

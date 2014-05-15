@@ -1,0 +1,94 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+my $version = get_version();
+
+print qq {
+
+<HTML>
+<HEAD>
+<TITLE>OpenDLP sidebar</TITLE>
+
+<script language=javascript>
+function toggleMe(a)
+{
+	var e=document.getElementById(a);
+	if(!e)return true;
+	if(e.style.display=="none")
+	{
+		e.style.display="block"
+	}
+	else
+	{
+		e.style.display="none"
+	}
+	return true;
+}
+</script>
+
+<link href="sidebar.css" rel="stylesheet" type="text/css" />
+</HEAD>
+<BODY BGCOLOR="#FFFFFF" LEFTMARGIN=2 TOPMARGIN=1>
+
+<div class="navcontainer">
+  <div class="navheader">OpenDLP };
+  
+  print "$version";
+  
+  print qq {</div>
+  <div class="nav"><A HREF="index.html" target="_top"><b>Main</b></A></div>
+  <div class="nav"><A onclick="return toggleMe('profiles')" target="_top"><b>Profiles</b></A></div>
+    <div id="profiles" style="display:none" class="subnav">
+      <p><a href="profiles.html" target="_top"><b>&nbsp;&nbsp;Create New Profile</b></a></p>
+      <p><a href="profiles-manage.html" target="_top"><b>&nbsp;&nbsp;Manage Profiles</b></a></p>
+    </div>
+  <div class="nav"><A onclick="return toggleMe('regex')" target="_top"><b>Regular Expressions</b></A></div>
+    <div id="regex" style="display:none" class="subnav">
+      <p><a href="regex.html" target="_top"><b>&nbsp;&nbsp;Create New Regex</b></a></p>
+      <p><a href="regex-delete.html" target="_top"><b>&nbsp;&nbsp;Delete Regex</b></a></p>
+    </div>
+  <div class="nav"><A onclick="return toggleMe('scans')" target="_top"><b>Scans</b></A></div>
+    <div id="scans" style="display:none" class="subnav">
+      <p><a href="startscan.html" target="_top"><b>&nbsp;&nbsp;Start New Scan</b></a></p>
+      <p><a href="viewresults.html" target="_top"><b>&nbsp;&nbsp;View Scans/Results</b></a></p>
+      <p><a href="exportscan.html" target="_top"><b>&nbsp;&nbsp;Export Scan Results</b></a></p>
+      <p><a href="deletescan.html" target="_top"><b>&nbsp;&nbsp;Delete Scan Results</b></a></p>
+    </div>
+  <div class="nav"><A onclick="return toggleMe('metasploit')" target="_top"><b>Metasploit</b></A></div>
+    <div id="metasploit" style="display:none" class="subnav">
+      <p><a href="meta-manage.html" target="_top"><b>&nbsp;&nbsp;Manage Agents</b></a></p>
+    </div>
+  <div class="nav"><A HREF="false.html" target="_top"><b>False Positives</b></A></div>
+  <div class="nav"><A HREF="logs.html" target="_top"><b>Logs</b></A></div>
+  <div class="nav"><A HREF="http://opendlp.googlecode.com" target="_blank"><b>OpenDLP Homepage</b></A></div>
+</div>
+</BODY>
+</HTML>
+};
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

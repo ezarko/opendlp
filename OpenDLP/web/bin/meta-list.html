@@ -1,0 +1,322 @@
+#!/usr/bin/perl
+
+# Copyright Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+use CGI qw/:standard/;
+use DBI;
+use Filesys::SmbClient;
+use POSIX ":sys_wait_h";
+use Proc::Queue;
+use MIME::Base64;
+use MetaSploiter;
+
+my $version = get_version();
+
+my $is_valid = 1;
+my $MAX_LENGTH_PROFILE = 64;
+my $MAX_LENGTH_SCAN = 64;
+my $MAX_LENGTH_URL = 256;
+my $MAX_CONCURRENT = 50;
+my $db_admin_file = "../etc/db_admin";
+
+
+my( $scanname, $profile ) = "";
+my( $db_username, $db_password ) = "";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if (request_method() ne "POST" )
+{
+	$is_valid = 0;
+	print "Only POST requests are allowed. Try starting <a href=meta-manage.html>here</a>.<br>\n";
+}
+
+foreach $p (param()) {
+	$form{$p} = param($p);
+
+	if ($p eq "profile" ) {
+		$profile = $form{$p};		
+		if (length( $profile ) > $MAX_LENGTH_PROFILE )	{
+			$is_valid = 0;
+			print "Profile is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+		}
+		if ($profile !~ /^[a-z0-9\ \,\.\-\_]+$/i )	{
+			$is_valid = 0;
+			print "Profile can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+		}
+	} elsif ($p eq "scanname") { 
+	  $scanname = $form{$p}; 
+	  if (length( $scanname ) > $MAX_LENGTH_PROFILE )	{
+			$is_valid = 0;
+			print "Scan name is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+		}
+		if ($scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )	{
+			$is_valid = 0;
+			print "Scan name can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+		}
+	}
+}
+
+if ($profile eq "") {
+  $is_valid = 0;
+  print "You must specify a profile.<br>\n";
+}
+if ($scanname eq "") { 
+  $is_valid = 0;
+  print "You must specify a scan name.<br>\n";
+}
+
+#need to pass profile, scanname, and systems to start-verify.html
+
+if ($is_valid ) {
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+  my $string = "SELECT scantype,metahost,metaport,metauser,metapass,metatimeout,metalatency,metassl from profiles where profile=?;";
+  
+  my $sth = $dbh->prepare( $string );
+	$sth->execute( $profile );
+	my $results = $sth->fetchrow_arrayref();
+	
+	my $scantype = $$results[0];
+	my $metahost = $$results[1];
+  my $metaport = $$results[2];
+  my $metauser = $$results[3];
+  my $metapass = $$results[4];
+  my $metatimeout = $$results[5];
+  my $metalatency = $$results[6];
+  my $metassl     = $$results[7];
+
+  if ($scantype ne "meta_agent" && $scantype ne "post_agent") { 
+    print "Invalid profile. This page only works with Metasploit Agent profiles.<br>\n";
+    exit(0);
+  }
+
+  print "<heading>Start a New Metasploit Agent Scan</heading><br>";
+
+  my $ret_code = 0;
+  my $debugTrace = 0;
+  my $metaSploiter = MetaSploiter->new();			
+  $metaSploiter->SetLatency($metalatency);
+  $metaSploiter->SetTimeout($metatimeout);  
+  if ($debugTrace) { print "Logging on to $metahost:$metaport. SSL=$metassl.<BR>\n"; }
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<font color=red>" . $metaSploiter->GetLastError() . "</font><br>\n";
+    if (index($metaSploiter->GetLastError(), "refused") != -1) {
+      print "<font color=red>MSGRPC may not be loaded on Metasploit system.</font><BR>\n";
+    }
+    exit(0);
+  }
+  if ($scantype eq "meta_agent") {
+    if ($debugTrace) { print "Checking for Armitage"; }
+    my $armitage = $metaSploiter->CheckForArmitage();  
+    if ( $armitage == 1) {
+      print qq{
+      <BR><BR><table border=3 cellspacing=3 cellpadding=3><tr><td>
+      <font color=red><font size=+1><b>WARNING: ARMITAGE DETECTED.</b></font><BR><BR>
+      Armitage and OpenDLP cannot be used on the same session at the same time.<BR>
+      When deploying OpenDLP through the Metasploit Bridge, do not interact with <BR>
+      the session through Armitage, or deployment may fail.<BR></font></td></tr></table><BR>};    
+    } # if ($armitage == 1)
+  }
+  print qq{ 
+<br>
+<table>
+  <tr>
+    <td><b>Scan&nbsp;Name:&nbsp;</b></td><td>$scanname&nbsp;</td>
+  </tr>
+  <tr>
+    <td><b>Profile:  </b></td><td>$profile&nbsp;</td>
+  </tr>
+  <tr><td><b>Scan Type:&nbsp;</b></td><td>$scantype</td></tr>
+</table>
+<BR>
+The following table contains a list of all exploit sessions on the Metasploit system. Note that for a<BR>
+successful OpenDLP deployment, the selected session must have a "Meterpreter" exploit type, and the<BR> 
+session must be to a Windows (x86/Win32) platform.<BR>
+<BR>
+Select the sessions to deploy to in the list below, and then click "Start Scan" to begin.<BR>
+<BR>
+};
+  if ($debugTrace) { print "Listing Sessions.<BR>\n"; }
+  if ($ret_code = $metaSploiter->ListSessions()) {
+    print "<font color=red>" . $metaSploiter->GetLastError() . "</font><br>\n";
+    exit(0);
+  }
+  my @sessionList = $metaSploiter->GetSessionList();
+  my $sessionListLen = scalar(@sessionList);
+  # Will fill out systems with javascript!
+  # post done with javascript!
+  print qq{
+  <form name="SessionList" method="POST" action="start-verify.html" onSubmit="return updateSystems();">
+  <input type="hidden" name="profile" value="$profile">
+  <input type="hidden" name="scanname" value="$scanname">
+  <input type="hidden" name="systems">
+  <table class=sample>
+    <tr>
+      <td style="background-color:LightGray"><input type="checkbox" name="checkAll" onchange="toggleCheckboxes();"></td>
+      <td style="background-color:LightGray"><b>Session&nbsp;Id&nbsp;</b></td>
+      <td style="background-color:LightGray"><b>IP&nbsp;Address:Port</b></td>
+      <td style="background-color:LightGray"><b>System&nbsp;Info</b></td>
+      <td style="background-color:LightGray"><b>Platform</b></td>
+      <td style="background-color:LightGray"><b>Exploit&nbsp;Type&nbsp;</b></td>
+    </tr>
+  };
+  foreach my $session(@sessionList) {
+    my $sessionId = $session->sessionName;
+    my $systemIp  = $session->tunnel_peer;
+    my $platform  = $session->platform;        
+    my $type     = $session->type;
+    my $info     = $session->info;
+    my $exploit  = $session->via_exploit;
+    my $payload  = $session->via_payload;    
+      
+
+    print qq{
+      <tr>
+        <td><input type="checkbox" name="checkList" value="$sessionId" onchange="document.SessionList.checkAll.checked = false;"></td>
+        <td>$sessionId&nbsp;</td>        
+        <td>$systemIp&nbsp;</td>
+        <td>$info&nbsp;</td>
+        <td>$platform&nbsp;</td>
+        <td>$type&nbsp;</td>        
+      </tr>
+    };
+  }
+
+  print "</table>";
+  
+  print qq{    
+    <BR>
+    <input type=submit value="Start Scan">   
+  </form>
+  };
+
+} #if ($is_valid)
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";
+	
+print qq{
+<SCRIPT TYPE="text/javascript">
+  <!-- Begin
+  function toggleCheckboxes() {    
+    var fields = document.SessionList.checkList;
+    var checkval = document.SessionList.checkAll.checked;
+    
+    if (Object.prototype.toString.call(fields).indexOf("NodeList") == -1) {
+      // Not an array     
+      fields.checked = checkval;  // Handles case where only one item in list
+    } else {          
+      // Handles case where many items in list
+      for (i = 0; i < fields.length; i++) {
+        fields[i].checked = checkval;
+      }      
+    }
+    return true;
+  }
+  function updateSystems() { 
+    
+    var fields = document.SessionList.checkList;
+    var checkval = document.SessionList.checkAll.checked;
+    if (Object.prototype.toString.call(fields).indexOf("NodeList") == -1) {
+      // Not an array     
+      if (fields.checked == true) document.SessionList.systems.value = fields.value;
+      else { 
+        alert("No sessions selected, nothing to scan.");
+        return false;
+      }
+    } else {  // Handles case where there are many items in list
+      var sessions = "";
+      var cnt = 0;
+      for (i = 0; i < fields.length; i++) {
+        if (fields[i].checked) {
+          cnt++;
+          sessions += fields[i].value + "\\n";
+        }
+      }
+      if (cnt == 0) { 
+        alert("No sessions selected, nothing to scan.");
+        return false;
+      }
+      document.SessionList.systems.value = sessions;      
+    }
+    return true;
+  }
+  //  End -->
+</SCRIPT>
+};
+	
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}

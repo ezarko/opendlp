@@ -1,0 +1,205 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+
+my $version = get_version();
+my $db_admin_file = "../etc/db_admin";
+my $is_valid = 1;
+my %systems = ();
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+my ($db_username, $db_password) = split( ":", $db_line );
+header();
+my $query = CGI->new;
+my $scanname = $query->param('scanname');
+if( $scanname ne "" && $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+{
+	$is_valid = 0;
+	print "Invalid scan name<br><br>\n";
+}
+
+my $system = $query->param('system');
+if( $system ne "" && $system !~ /^[A-Z0-9]{32}$/ )
+{
+	$is_valid = 0;
+	print "Invalid system tracker<br><br>\n";
+}
+
+if( $is_valid )
+{
+	print "<heading>Delete Scans</heading><br><br>\n";
+
+	print "By default, only scans whose agents have all finished or have been manually stopped and uninstalled are shown below, and scans currently running will not be displayed.<br><br>\n";
+	print qq{<input type=checkbox onchange='toggleRows(this.checked);' id="toggleDisplay" name="toggleDisplay" checked="false">Display incomplete scans<BR><Br>\n};
+
+
+	print "<form method=POST action=deletescan-verify.html>\n";
+	print "<table id=\"table1\" class=sample border=1 cellpadding=1 cellspacing=1>\n";
+	print "<tr style=\"display:table-row\"><td>Delete</td><td>Scan name</td><td>Scan type</td><td>Finished</td><td>Uninstalled</td><td>Total</td></tr>\n";
+
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $string = "SELECT DISTINCT scan,ip,control,scantype FROM systems";
+	my $sth = $dbh->prepare( $string );
+	$sth->execute();
+	while( my $results = $sth->fetchrow_arrayref() )
+	{
+		if( $$results[2] eq "running" )
+		{
+			$scans{$$results[0]}{running}++;
+		}
+		elsif( $$results[2] eq "finished" )
+		{
+			$scans{$$results[0]}{finished}++;
+		}
+		elsif( $$results[2] eq "stopped" )
+		{
+			$scans{$$results[0]}{stopped}++;
+		}
+		elsif( $$results[2] eq "uninstalled" )
+		{
+			$scans{$$results[0]}{uninstalled}++;
+		}
+		$scans{$$results[0]}{scantype} = $$results[3];
+	}
+	foreach my $scankey( sort( keys( %scans )))
+	{
+		my $total = $scans{$scankey}{running} + $scans{$scankey}{finished} + $scans{$scankey}{stopped} + $scans{$scankey}{uninstalled};
+		if( $total = ($scans{$scankey}{finished} + $scans{$scankey}{uninstalled} )) {		
+			print qq{<tr id="complete" style="display:table-row;">};
+	  } else {
+			print qq{<tr id="incomplete" style="display:none;">};
+		}
+    print "<td><input type=checkbox name=scanname value=\"$scankey\"></td>\n";
+    
+    if( $total = ($scans{$scankey}{finished} + $scans{$scankey}{uninstalled} )) {	
+      print "<td>$scankey </td><td>$scans{$scankey}{scantype}</td>\n";
+    } else {
+      print qq{<td style="color:red;">$scankey</td><td>$scans{$scankey}{scantype}</td>\n};      
+    }
+
+    # Finished
+    if( $scans{$scankey}{finished} == 0 )
+    {
+      print "<td>0</td>\n";
+    }
+    else
+    {
+      print "<td>$scans{$scankey}{finished}</td>\n";
+    }
+
+    # Uninstalled
+    if( $scans{$scankey}{uninstalled} == 0 )
+    {
+        print "<td>0</td>\n";
+    }
+    else
+    {
+      print "<td>$scans{$scankey}{uninstalled}</td>\n";
+    }
+
+    print "<td>$total</td></tr>\n";
+		
+	}
+	print "<tr><td colspan=10><input type=submit value=\"Delete Scans\"</td></tr>\n";
+	print "</table></form>\n";
+}
+
+
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+print qq {
+<style type="text/css">
+table.sample {
+        border-width: 1px;
+        border-spacing: 2px;
+        border-style: outset;
+        border-color: black;
+        border-collapse: collapse;
+        background-color: white;
+}
+table.sample th {
+        border-width: 1px;
+        padding: 2px;
+        border-style: inset;
+        border-color: black;
+        background-color: white;
+        -moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+        border-width: 1px;
+        padding: 2px;
+        border-style: inset;
+        border-color: black;
+        background-color: white;
+        -moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+print qq{
+<SCRIPT type="text/javascript">
+<!--
+
+function toggleRows(val) {
+  var tab=document.getElementById("table1");
+  for (i = 0; i < tab.rows.length; i++) {
+    var row = tab.rows[i];    
+    if (row.id == "incomplete") {    
+      row.style.display = (val ? "table-row" : "none");      
+    }     
+  }
+}
+
+//-->
+</SCRIPT>
+};
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\'); document.getElementById(\'toggleDisplay\').checked=false\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

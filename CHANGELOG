@@ -1,0 +1,166 @@
+2012.08.27 - OpenDLP 0.5.1
+- Fixed some input validation issues in start-verify.html. These were introduced
+  in 0.5 and primarily affected Windows share scans.
+- Reverted Windows agent to 0.4.4 version as the 0.5 version was crashing.
+- Changed profiles.html for Metasploit-based scans to not display the OS
+  username and password HTML fields. These fields are not required and not used
+  for Metasploit-based scans anyway.
+- Made small changes to help.html.
+
+2012.07.25 - OpenDLP 0.5
+- Added support for launching agents over Meterpreter sessions
+  (charles.smith@n2netsec.com, michael.baucom@n2netsec.com)
+- Cleaned up Windows agent code (charles.smith@n2netsec.com)
+
+2012.02.22 - OpenDLP 0.4.4
+- Fixed issue #43: "Not able to scan MSSQL 2005 DB"
+- Fixed issue #46: "MS SQL Scan with instance"
+- Fixed issue #47: "Agent crashes with many files"
+- Improved memory use for UNIX agentless filesystem scans
+- Improved memory use for Windows agentless filesystem and share scans
+- Added overall totals to viewresults.html for each scan type
+- Fixed aesthetic bug when launching agentless scans and no HTML newline breaks
+  were printing in the "Child agentless scanning process started" message.
+- Added more notes about MSSQL instances to startscan.html page.
+- Added message in profile creation page's agent installation path about temp
+  files possibly being readable by other users.
+- Escaped a backslash in help.html.
+
+2012.01.07 - OpenDLP 0.4.3
+- Fixed bugs related to not accounting for whitespaces in profile or scan names.
+  This would cause scan results and logs to not properly display in web UI.
+- Fixed bug that didn't allow all legal characters in Microsoft Windows share
+  names. This prevented users from running agentless Windows share scans against
+  systems like "\\192.168.1.1\@share". OpenDLP previously only allowed nothing
+  but alphanumeric, underscore, dash, and period characters.
+
+2011.09.08 - OpenDLP 0.4.2
+- Fixed bug when ZIP files contained same file name (case insensitive). This
+  would cause the unzip.exe to prompt whether to overwrite, skip, or rename,
+  which would make OpenDLP stall indefinitely. This is now fixed to ignore
+  files with the same case-insensitive name after the first has already been
+  extracted. This only affected Windows agent scans.
+- Added lots of client-side Javascript input validation to the profile page.
+
+2011.08.15 - OpenDLP 0.4.1
+- Agent: Fixed crashing bug when trying to scan files greater than 2 GB. Big
+  thanks to JRS for the research and patch!
+- Agent: If results are uploaded after only first file was done being scanned,
+  agent would report 0 bytes scanned. Now it reports size of that first file to
+  the webapp.
+- Webapp: Fixed typo bug causing Windows agentless/share scans not to work with
+  pass-the-hash
+- Webapp: Fixed issue with pass-the-hash not working for agent scans
+- Webapp: Fixed sensitive data unmasking bug with agentless OS scans
+
+2011.07.29 - OpenDLP 0.4
+- Webapp: Added support for agentless Windows file system scans.
+- Webapp: Added support for agentless Windows share scans.
+- Webapp: Added support for agentless UNIX file system scans.
+- Webapp: When editing existing profile, fixed bug that caused log verbosity
+  level 3 to not be an option.
+
+2011.06.06 - OpenDLP 0.3.2
+- Agent: Fixed significant crashing bug from trying to write a NULL beyond the
+  end of allocated memory.
+- Agent: Fixed cosmetic bug that would incorrectly report file sizes for files
+  greater than the size allowed by the agent to use in RAM.
+- Webapp: Fixed bug that would still print false positives in XML output
+- Added another level of logging verbosity.
+
+2011.05.06 - OpenDLP 0.3.1
+- Webapp: Added agentless scanning support for MySQL databases.
+
+2011.05.05 - OpenDLP 0.3
+- Webapp: Added agentless scanning support for Microsoft SQL Server databases.
+- Webapp: Fixed bug when downloading files with whitespace. Filenames no longer
+  truncated at first whitespace.
+- Webapp: Fixed bug in XML output that would append HTML to end of XML stream.
+- Webapp: Fixed bug that did not fully clean up OpenDLP if OpenDLP installation
+  directory had leftover subdirectories.
+- Webapp: Fixed bug in UI that would cause pause/resume/uninstall control
+  buttons to not function on the two higher level viewresults.html pages.
+- Webapp: Cleaned up other minor bugs related to database calls.
+- Agent: Removed ability for agent to scan floppy drives. On some Windows 2000
+  systems, a dialog displays on the screen warning the user that there is no
+  floppy in the drive. The scan would not proceed until this dialog was
+  addressed.
+
+2011.02.05 - OpenDLP 0.2.6
+- Webapp: Added pass-the-hash support thanks to a patch supplied by @steponequit
+  ("someLuser" at blog.hurricanelabs.com and console-cowboys.blogspot.com).
+  Thank you!
+- Webapp: Added help links for policy creation.
+
+2011.01.10 - OpenDLP 0.2.5
+- Webapp: Added feature to download files with findings from target system
+- Webapp: Added option to edit existing scan profiles
+- Webapp: Added profile option to mask or unmask sensitive data (default is
+  to mask) when storing data in OpenDLP database and displaying in webapp
+- Webapp: Cleaned up some DB calls in "viewresults.html"
+- Webapp: Removed BIN, MDF, SDF file extensions from default exclusion list
+
+2011.01.05 - OpenDLP 0.2.4
+- Agent: Chop large files into segments as a percent of available memory on
+  target system (user-specified in profile).
+- Webapp: Added web interface to profile creation page for chopping files
+  (default is 10%).
+- Webapp: Fixed bug in webapp where it would incorrectly calculate estimated
+  remaining scan time.
+- Webapp: Removed default blacklist for JAR and ZIP file extensions.
+- Webapp: Added JAR file extension to ZIP Extensions list.
+- Webapp: Added link to OpenDLP home page to navigation sidebar.
+- Webapp: Made HTML tables less ugly.
+- Webapp: Fixed bug that expanded Scan menu option when Logs menu option
+  clicked.
+- Webapp: Fixed typo in profile form that set all log verbosity levels to 0.
+- Webapp: Added commas to numbers in scan results pages.
+- Webapp: Added warnings to log verbosity levels 1 and 2.
+
+2010.12.21 - OpenDLP 0.2.3
+- Fixed bug 9: Added support for underscores in Windows domain names.
+- Speed enhancement: If user selects to only scan specified directories,
+  OpenDLP no longer enumerates all files on all drives when it initializes. It
+  will only enumerate files in specified directories.
+
+2010.05.24 - OpenDLP 0.2.2
+- Fixed bug where Windows agent would crash if it was unable to open the very
+  last file inside a ZIP archive.
+- Fixed bug where Windows agent would crash if it attempted to process an
+  empty ZIP file.
+- Fixed bug where Windows agent would stall if it attempted to process a
+  password-protected ZIP file.
+- Fixed bug where Windows agent would not fully delete remnants of ZIP files
+  if some files were marked as read-only, which would cause web application's
+  uninstallation process to not fully delete entire installation directory.
+
+2010.05.20 - OpenDLP 0.2.1
+- Fixed bug where Windows agent would crash if it was unable to open the very
+  last file to scan.
+
+2010.05.12 - OpenDLP 0.2
+- Separated agent's large C loop into smaller, more manageable functions in
+  separate files.
+- Added non-recursive ZIP support to agent.
+- Added pattern masking so only last 25% of patterns are stored and displayed
+  in plaintext.
+- Added log viewing interface to web application.
+- Added ZIP file extension options to web application's profile creation.
+- Added progress bar, progress percent, and estimated time to completion to
+  the results pages.
+- Removed double backslashes from filenames in results.
+- Fixed bug where credit card numbers were being hardcoded in agent's config
+  instead of using what was specified from web application.
+- Web application's profile page makes an educated guess as to where the 
+  "Upload URL" resides.
+- Web application now sorts by number (chronological) when viewing HTML
+  results.
+- Fixed bug in viewresults.html where unprintable characters would sometimes
+  cause results to not be printed. Replaced all unprintable characters with
+  "?".
+- Added "cmf" to default list of file extensions to ignore.
+- Added delay between stopping agent and deleting agent to allow for Windows
+  to regain sanity (otherwise not all files will be deleted).
+
+2010.04.29 - OpenDLP 0.1
+- Initial release

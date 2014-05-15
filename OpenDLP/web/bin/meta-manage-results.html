@@ -1,0 +1,622 @@
+#!/usr/bin/perl
+
+# Copyright Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+# 
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or 
+# (at your option) any later version.
+# 
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+use CGI qw/:standard/;
+use DBI;
+use Filesys::SmbClient;
+use POSIX ":sys_wait_h";
+use Proc::Queue;
+use MIME::Base64;
+use MetaSploiter;
+use MetaPostModule;
+
+my $version = get_version();
+
+my $is_valid = 1;
+my $MAX_LENGTH_PROFILE = 64;
+my $MAX_LENGTH_SCAN = 64;
+my $MAX_LENGTH_URL = 256;
+my $MAX_CONCURRENT = 50;
+my $db_admin_file = "../etc/db_admin";
+
+
+my( $action, $profile, $systems ) = "";
+my( $db_username, $db_password ) = "";
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if (request_method() ne "POST" ) {
+  $is_valid = 0;
+	print "Only POST requests are allowed. Try starting <a href=meta-manage.html>here</a>.<br>\n";
+
+}
+
+if ($is_valid) {
+
+  foreach $p (param()) {
+    $form{$p} = param($p);
+
+    if ($p eq "profile" ) {
+      $profile = $form{$p};		
+      if (length( $profile ) > $MAX_LENGTH_PROFILE )	{
+        $is_valid = 0;
+        print "Profile is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+      }
+      if ($profile !~ /^[a-z0-9\ \,\.\-\_]+$/i )	{
+        $is_valid = 0;
+        print "Profile can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+      }
+    } 
+    if ($p eq "actionType") {
+      $action = $form{$p};
+    }
+    if ($p eq "systems") { $systems = $form{$p}; }
+  }
+
+  if ($profile eq "") {
+    $is_valid = 0;
+    print "You must specify a profile.<br>\n";
+  }
+  if (!($action eq "resume" || $action eq "pause" || $action eq "uninstall") ) {
+    $is_valid = 0;
+    print "Invalid action. The only supported actions are pause, resume, and uninstall.<BR>\n";
+  }
+  if ($systems eq "") {
+    $is_valid = 0;
+    print "No sessions selected.<BR>\n"; 
+  }
+    
+
+
+  if ($is_valid ) {
+    my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+    my $string = "SELECT scantype,metahost,metaport,metauser,metapass,metassl,path from profiles where profile=?;";
+    
+    my $sth = $dbh->prepare( $string );
+    $sth->execute( $profile );
+    my $results = $sth->fetchrow_arrayref();
+    
+    my $scantype = $$results[0];
+    my $metahost = $$results[1];
+    my $metaport = $$results[2];
+    my $metauser = $$results[3];
+    my $metapass = $$results[4];
+    my $metassl  = $$results[5];
+    my $path = $$results[6];    
+
+    if ($scantype ne "meta_agent" && $scantype ne "post_agent") { 
+      print "Invalid profile. This page only works with Metasploit Agent profiles.<br>\n";
+      exit(0);
+    }
+
+    print qq{
+    <heading>Manage OpenDLP agents through Metasploit</heading><br>
+    <br>
+    <table>
+      <tr><td>Using profile:&nbsp;</td><td>$profile</td></tr>
+      <tr><td>Action:             </td><td><b>$action</b></td></tr>
+    </table>
+    <BR>
+    };
+
+    # First connect and get the list of sessions.
+    my $ret_code = 0;
+    
+	  my $metaSploiter = MetaSploiter->new();	        
+    if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+      print $metaSploiter->GetLastError() . "<br>\n";
+      exit(0);
+    }    
+    if ($ret_code = $metaSploiter->ListSessions()) {
+      print $metaSploiter->GetLastError() . "<br>\n";
+      exit(0);
+    }    
+          
+    my @sessionList = $metaSploiter->GetSessionList();
+    my $sessionListLen = scalar(@sessionList);    
+    
+    #These are the target systems, a subset of the full session list.
+    my @targetSessions = split ("\n", $systems); #todo: split on space (gets all whitespace), and commas.
+    my $targetsLeft = scalar(@targetSessions);
+      
+    #trim crlfs from targetSession list.
+    for (my $i = 0; $i < scalar(@targetSessions); $i++) {
+      $targetSessions[$i] =~ s/\r$//g;
+      $targetSessions[$i] =~ s/\n$//g;
+    }   
+    # Metasploiter finished.
+    
+    print qq{    
+    <table class=sample>
+      <tr>        
+        <td style="background-color:LightGray"><b>Session&nbsp;Id&nbsp;</b></td>
+        <td style="background-color:LightGray"><b>IP&nbsp;Address:Port</b></td>
+        <td style="background-color:LightGray"><b>System&nbsp;Info</b></td>
+        <td style="background-color:LightGray"><b>Platform</b></td>
+        <td style="background-color:LightGray"><b>Exploit&nbsp;Type&nbsp;</b></td>
+        <td style="background-color:LightGray"><b>Result&nbsp;</b></td>
+      </tr>
+    };
+    
+    foreach my $session(@sessionList) { #todo: fork here
+    
+      if ($targetsLeft <= 0) { last; }
+      if (grep {$_ eq $session->sessionName} @targetSessions) { # if (@targetSessions.indexOf($session->sessionName) != -1)
+        $targetsLeft--;
+        
+        my $sessionId = $session->sessionName;
+        my $systemIp  = $session->tunnel_peer;
+        my $platform  = $session->platform;        
+        my $type     = $session->type;
+        my $info     = $session->info;
+        my $exploit  = $session->via_exploit;
+        my $payload  = $session->via_payload;    
+                    
+        #todo:  connect, pause/resume/uninstall, print below:
+        #check for opendlp directory from profile
+        #check for service running
+        #etc.
+        # $result = "<font color=blue>OpenDLP not installed on this system.</font>"
+        # $result = "<font color=red>" . $metaSploiter->GetLastError() . "</font>"
+        # $result = "<font color=green>OpenDLP service stopped.</font>"
+        print qq{
+          <tr>          
+            <td>$sessionId&nbsp;</td>        
+            <td>$systemIp&nbsp;</td>
+            <td>$info&nbsp;</td>
+            <td>$platform&nbsp;</td>
+            <td>$type&nbsp;</td>
+        };
+        if ($action eq "pause") {
+          if ($scantype eq "meta_agent") { 
+            MetaStopOpenDLP($metahost, $metaport, $metauser, $metapass, $metassl, $sessionId, $path); #this prints the result!          
+          } else { 
+            ArmStopOpenDLP($metahost, $metaport, $metauser, $metapass, $metassl, $sessionId, $path); #this prints the result!          
+          }
+        } elsif ($action eq "resume") {
+          if ($scantype eq "meta_agent") {
+            MetaStartOpenDLP($metahost, $metaport, $metauser, $metapass, $metassl, $sessionId, $path); #this prints the result!          
+          } else {
+            ArmStartOpenDLP($metahost, $metaport, $metauser, $metapass, $metassl, $sessionId, $path); #this prints the result!          
+          }
+        } elsif ($action eq "uninstall") {
+          if ($scantype eq "meta_agent") {
+            MetaDeleteOpenDLP($metahost, $metaport, $metauser, $metapass, $metassl, $sessionId, $path); #this prints the result!                  
+          } else {
+            ArmDeleteOpenDLP($metahost, $metaport, $metauser, $metapass, $metassl, $sessionId, $path); #this prints the result!          
+          }
+        } else {
+          print "<td><font color=red>Error: Unknown action type.</font></td>\n";
+        }
+        print "</tr>\n";
+      } # if (grep {$_ eq $session->sessionName} @targetSessions) {      
+    } #foreach my $session(@sessionList) {
+    print "</table>\n";
+    if ($targetsLeft) { 
+      print "<font color=red>WARNING: One or more sessions was not found on the Metasploit system, and thus could not be ". $action;
+      if ($action eq "uninstall") { print "e"; }
+      print "d.</font><BR><BR>\n";             
+    } # if ($targetsLeft)
+  } # if ($is_valid ) 
+} #if ($is_valid ) 
+
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+
+print qq {
+<style type="text/css">
+table.sample {
+	border-width: 1px;
+	border-spacing: 2px;
+	border-style: outset;
+	border-color: black;
+	border-collapse: collapse;
+	background-color: white;
+}
+table.sample th {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+table.sample td {
+	border-width: 1px;
+	padding: 2px;
+	border-style: inset;
+	border-color: black;
+	background-color: white;
+	-moz-border-radius: 0px 0px 0px 0px;
+}
+</style>};
+	print "</head>\n";		
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'metasploit\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+
+#todo: Check ret_codes on all the metaPostModule method calls.
+
+sub ArmStopOpenDLP {
+   # returns 0 for success.
+  # returns 1 for success with warning.
+  # returns -1 for error.  
+  my $metahost = shift(@_);
+  my $metaport = shift(@_);
+  my $metauser = shift(@_);
+  my $metapass = shift(@_);
+  my $metassl  = shift(@_);
+  my $sessionId= shift(@_);
+  my $path     = shift(@_);
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+  
+  my $metaPostModule = MetaPostModule->new();
+
+  my $ret_code = 0;
+  if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<td><font color=red>Error logging onto Metasploit: " . $metaPostModule->GetLastError() . "</font></td>\n";    
+    return -1;
+  }  
+  
+  $metaPostModule->SetRemotePath($path);
+  $metaPostModule->SetSessionId($sessionId);
+  $metaPostModule->SetModuleName("windows/gather/opendlp");
+  $ret_code = $metaPostModule->StopOpenDLP();
+  
+  if ($ret_code == 0) {
+    print "<td><font color=green>OpenDLP service stopped.</font></td>\n";
+    return 0; 
+  } else {
+      if ($metaPostModule->GetLastError() =~ /Could\ not\ Open\ Service,\ Access\ Denied/) {
+      print "<td><font color=red>OpenDLP service is not installed on this machine.</font></td>\n";      
+    } else {
+      print "<td><font color=red>Error stopping OpenDLP Service:";
+      print $metaPostModule->GetLastError();
+      print "</font></td>\n";
+    }
+    return -1; 
+  }
+}
+
+sub ArmStartOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $metahost = shift(@_);
+  my $metaport = shift(@_);
+  my $metauser = shift(@_);
+  my $metapass = shift(@_);
+  my $metassl  = shift(@_);
+  my $sessionId = shift(@_);
+  my $path     = shift(@_);
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+  
+  my $metaPostModule = MetaPostModule->new();
+
+  my $ret_code = 0;
+  if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<td><font color=red>Error logging onto Metasploit: " . $metaPostModule->GetLastError() . "</font></td>\n";    
+    return -1;
+  }  
+  
+  $metaPostModule->SetRemotePath($path);
+  $metaPostModule->SetSessionId($sessionId);
+  $metaPostModule->SetModuleName("windows/gather/opendlp");
+  $ret_code = $metaPostModule->StartOpenDLP();
+  
+  if ($ret_code == 0) {
+    print "<td><font color=green>OpenDLP service started.</font></td>\n";
+	  return 0; 
+	} else {
+    if ($metaPostModule->GetLastError() =~ /Could\ not\ Open\ Service,\ Access\ Denied/) {
+      print "<td><font color=red>OpenDLP service is not installed on this machine.</font></td>\n";      
+    } else {
+      print "<td><font color=red>Error starting OpenDLP Service: ";
+      print $metaPostModule->GetLastError();
+      print "</font></td>\n";
+    }
+    return -1;
+	}
+}
+
+sub ArmDeleteOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $metahost = shift(@_);
+  my $metaport = shift(@_);
+  my $metauser = shift(@_);
+  my $metapass = shift(@_);
+  my $metassl  = shift(@_);
+  my $sessionId = shift(@_);
+  my $path     = shift(@_);
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+
+  my $metaPostModule = MetaPostModule->new();
+
+  my $ret_code = 0;
+  if ($ret_code = $metaPostModule->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<td><font color=red>Error logging onto Metasploit: " . $metaPostModule->GetLastError() . "</font></td>\n";    
+    return -1;
+  }  
+  #This may take a while, so acquire a persistent authentication token.
+  if ($ret_code = $metaPostModule->AcquirePersistentToken() ) {
+    print "<td><font color=red>Error acquiring persistent login token: " . $metaSploiter->GetLastError() . "</font></td>\n";    
+    return -1;
+  }
+  
+  $metaPostModule->SetRemotePath($path);
+  $metaPostModule->SetSessionId($sessionId);
+  $metaPostModule->SetModuleName("windows/gather/opendlp");
+  $ret_code = $metaPostModule->DeleteOpenDLP();
+  
+  #problem: Same error message is returned no matter what the cause is.
+  #solution: If I get the message and am able to delete the directory, it means OpenDLP was
+  #          not installed. If I get the message and cannot delete the directory, OpenDLP
+  #          is still running. 
+  
+  my $accessDenied = "";
+  if ($ret_code == 0) {  
+    print "<td><font color=green>OpenDLP service deleted.</font>";
+    $ret_code = 0;
+  } else {
+    if ($metaPostModule->GetLastError() =~ /Could\ not\ Open\ Service,\ Access\ Denied/) {
+      #print "<td><font color=blue>OpenDLP service is not installed on this machine.</font>";
+      $accessDenied = $metaPostModule->GetLastError();    
+      $ret_code = 1;
+    } else {  
+      my $output = $metaPostModule->GetLastError();
+      $output =~ s/\n/<br>/g;
+      print "<td><font color=red>Unexpected response from command: <br>$output</font>";
+      $ret_code = -1;
+    }
+  }
+  sleep(3);  
+  $ret_code = $metaPostModule->RemoveRemotePath();  
+  if ($ret_code == 0 && $accessDenied) {
+    print "<td><font color=red>OpenDLP service is not installed on this machine.</font>";
+  }  
+  if ($ret_code) {    
+    if ($accessDenied) {
+      print "<td><font color=red>$accessDenied</font>";     
+    }
+    if ($metaPostModule->GetLastError() =~ /Failed\ to\ delete\ remote\ path/) {       
+      print "<BR><font color=red>Unable to remove installation directory, directory '$path' may be in use. </font>";
+      $ret_code = -1;
+    } else {      
+      print "<BR><font color=red>Error deleting installation directory: ";
+      print $metaPostModule->GetLastError() . "</font>";
+    }
+  }
+  #Release the persistent token, so as to not pollute the database.
+  $metaPostModule->ReleasePersistentToken();
+  print "</td>\n";
+  return $ret_code; 
+} #ArmDeleteOpenDLP
+
+sub MetaStopOpenDLP {  
+  # returns 0 for success.
+  # returns 1 for success with warning.
+  # returns -1 for error.  
+  my $metahost = shift(@_);
+  my $metaport = shift(@_);
+  my $metauser = shift(@_);
+  my $metapass = shift(@_);
+  my $metassl  = shift(@_);
+  my $sessionId= shift(@_);
+  my $path     = shift(@_);
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+    
+  # stop OpenDLP
+  my $metaSploiter = MetaSploiter->new();			
+  #use default latency (100)
+  #use default timeout (30)
+
+  my $ret_code = 0;
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<td><font color=red>Error logging onto Metasploit: " . $metaSploiter->GetLastError() . "</font></td>\n";    
+    return -1;
+  }  
+  if ($ret_code = $metaSploiter->ChangeRemotePath($sessionId, "$path") ) {  
+    print "<td><font color=red>OpenDLP is not installed on this system.</font></td>\n";    
+    return -1;  #warning
+  }
+  $metaSploiter->ChangeRemotePath($sessionId, "/");  
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "stop", "OpenDLP");  
+  my $output = $metaSploiter->GetCommandResponse();  
+  
+  if ($output =~ /(STOP_PENDING|STOPPED)/) { 
+    print "<td><font color=green>OpenDLP service stopped.</font></td>\n";
+    return 0; 
+  } elsif( $output =~ /The\ service\ has\ not\ been\ started/ ) { 
+    print "<td><font color=blue>OpenDLP service was already stopped.</font></td>\n";
+    return 1; 
+  } elsif ($output =~ /service\ does\ not\ exist/) {
+    print "<td><font color=red>OpenDLP service is not installed on this machine.</font></td>\n";
+    return -1;
+  }
+  print "<td><font color=red>Unknown error stopping OpenDLP Service.";
+  print $output;
+  print "</font></td>\n";
+  return -1;
+}
+
+sub MetaStartOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $metahost = shift(@_);
+  my $metaport = shift(@_);
+  my $metauser = shift(@_);
+  my $metapass = shift(@_);
+  my $metassl  = shift(@_);
+  my $sessionId = shift(@_);
+  my $path     = shift(@_);
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+  
+  # start OpenDLP
+  my $metaSploiter = MetaSploiter->new();			
+  #use default latency (100)
+  #use default timeout (30)
+
+  my $ret_code = 0; 
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<td><font color=red>Error logging onto Metasploit: " . $metaSploiter->GetLastError() . "</font></td>\n";    
+    return -1;
+  }  
+  if ($ret_code = $metaSploiter->ChangeRemotePath($sessionId, "$path") ) {  
+    print "<td><font color=red>OpenDLP is not installed on this system.</font></td>\n";    
+    return -1;
+  }
+  $metaSploiter->ChangeRemotePath($sessionId, "/");
+    
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "start", "OpenDLP");
+  my $output = $metaSploiter->GetCommandResponse();      
+	if( $output =~ /(START_PENDING|RUNNING)/ ) { 
+	  print "<td><font color=green>OpenDLP service started.</font></td>\n";
+	  return 0; 
+	} elsif ($output =~ /service\ is\ already\ running/) {
+    print "<td><font color=blue>OpenDLP service is already running.</font></td>\n";
+    return 1; 
+  } elsif ($output =~ /service\ does\ not\ exist/) {
+    print "<td><font color=red>OpenDLP service is not installed on this machine.</font></td>\n";
+    return -1;
+  }
+	print "<td><font color=red>Unknown error starting OpenDLP Service.";
+  print $output;
+  print "</font></td>\n";
+	return -1;
+}
+
+sub MetaDeleteOpenDLP {
+  # returns 0 for success.  
+  # returns -1 for error.
+
+  my $metahost = shift(@_);
+  my $metaport = shift(@_);
+  my $metauser = shift(@_);
+  my $metapass = shift(@_);
+  my $metassl  = shift(@_);
+  my $sessionId = shift(@_);
+  my $path     = shift(@_);
+  $path =~ s/\\/\//g; # replaces backslash with forward slash
+  
+  my $metaSploiter = MetaSploiter->new();			
+
+  my $ret_code = 0;
+  if ($ret_code = $metaSploiter->MetaLogin($metahost, $metaport, $metauser, $metapass, $metassl) ) {
+    print "<td><font color=red>Error logging onto Metasploit: " . $metaSploiter->GetLastError() . "</font></td>\n";
+    return -1;
+  }  
+  #This may take a while, so acquire a persistent authentication token.
+  if ($ret_code = $metaSploiter->AcquirePersistentToken() ) {
+    print "<td><font color=red>Error acquiring persistent login token: " . $metaSploiter->GetLastError() . "</font></td>\n";    
+    return -1;
+  }
+  $metaSploiter->MeterpreterRead($sessionId); # eat any output waiting on the console.
+  
+  if ($ret_code = $metaSploiter->ChangeRemotePath($sessionId, "$path") ) {      
+    print "<td><font color=blue>OpenDLP is not installed on this system. </font></td>\n";    
+    return 0;
+  }
+  $metaSploiter->ChangeRemotePath($sessionId, "/");
+  
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "stop", "OpenDLP");  
+  # Don't care about the results of the stop.
+  sleep(3); # wait for system to regain normalcy.
+  $metaSploiter->RemoteExecuteAndReadChannel($sessionId, "\"$path/sc.exe\"", "delete", "OpenDLP");
+  my $output = $metaSploiter->GetCommandResponse();  
+  
+  if( $output =~ /DeleteService\ SUCCESS/) {    
+    print "<td><font color=green>OpenDLP service deleted.</font>";
+    $ret_code = 0;
+  } elsif ($output =~ /service\ does\ not\ exist/) {
+    print "<td><font color=blue>OpenDLP service is not installed on this machine.</font>";
+    $ret_code = 1;
+  } elsif ($output =! /cannot\ find\ the\ file\ specified/) {
+    print "<td><font color=blue>OpenDLP service is not installed on this machine.</font>";
+    $ret_code = 1;
+  } else {
+    $output =~ s/\n/<br>/g;
+    print "<td><font color=red>Unexpected response from command: <br>$output.</font>";
+    $ret_code = -1;
+  }
+  sleep(3);  
+  $metaSploiter->ChangeRemotePath($sessionId, "/"); # make sure we're not keeping a handle in the directory open.
+  $metaSploiter->RemoteExecute($sessionId, "\"$path/remove.bat\"");  
+  sleep(3);  #wait for script to execute.
+  if ($metaSploiter->ChangeRemotePath($sessionId, "$path") == 0) {  #remove.bat didn't take care of deleting this.
+    $metaSploiter->ChangeRemotePath($sessionId, "/");
+    $metaSploiter->SendAndWait($sessionId, "rmdir \"$path\"");     
+    $output = $metaSploiter->GetCommandResponse();    
+    # rmdir response may be "Removing directory", and then might be immediately followed by an error message.
+    # OR it might immediately return just the error message. No way to know for sure what the console is going
+    # to do. SO, send a simple "pwd" command and wait for a response. That will guarantee we receive the error,
+    # if there is one.
+    $metaSploiter->SendAndWait($sessionId, "pwd");
+    $output .= $metaSploiter->GetCommandResponse();
+    if ($output =~ /being\ used\ by\ another\ process/) {
+      print "<BR><font color=red>Unable to remove installation directory, directory '$path' is in use. </font>";
+      $ret_code = -1;
+    } elsif ($output =~ /directory\ is\ not\ empty/) {
+      print "<BR><font color=red>Unable to remove installation directory, directory '$path' is not empty.</font>";
+      $ret_code = -1;
+    } elsif ($output =~ /system\ cannot\ find\ the\ file\ specified/) {
+      #Directory deleted already by remove.bat script above. It doesn't always work, so that's why we try again.
+      #do nothing here.
+    } elsif (index($output, "[-]") != -1) { 
+      $output =~ s/\n/<br>/g;
+      print "<BR><font color=red>Unknown error deleting installation directory: <BR>$output</font>";
+    }
+  } #if ($metaSploiter->ChangeRemotePath($sessionId, "$path") == 0) {
+  #Release the persistent token, so as to not pollute the database.
+  $metaSploiter->ReleasePersistentToken();
+  print "</td>\n";
+  return $ret_code; 
+}

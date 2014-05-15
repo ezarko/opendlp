@@ -1,0 +1,138 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+use DBI;
+
+my $version = get_version();
+
+my $is_valid = 1;
+my $MAX_LENGTH_SCAN = 64;
+my $db_admin_file = "../etc/db_admin";
+
+my( $scanname, $tracker ) = "";
+my( $db_username, $db_password ) = "";
+my @FPs = ();
+
+open( DB, $db_admin_file );
+my $db_line = <DB>;
+close( DB );
+chomp $db_line;
+($db_username, $db_password) = split( ":", $db_line );
+
+header();
+
+if( request_method() ne "POST" )
+{
+	$is_valid = 0;
+	print "Only POST requests are allowed.<br>\n";
+}
+
+foreach $p (param())
+{
+	$form{$p} = param($p);
+	if( $p eq "scan" )
+	{
+		$scanname = $form{$p};
+		if( length( $scanname ) > $MAX_LENGTH_SCAN )
+		{
+			$is_valid = 0;
+			print "Scan name is too long. Limit it to $MAX_LENGTH_SCAN characters.<br><br>\n";
+		}
+		if( $scanname !~ /^[a-z0-9\ \,\.\-\_]+$/i )
+		{
+			$is_valid = 0;
+			print "Scan name can only contain the following characters, including whitespace: A-Z0-9,.-_<br><br>\n";
+		}
+	}
+
+	if( $p eq "tracker" )
+	{
+		$tracker = $form{$p};
+		if( $tracker !~ /^[A-F0-9]{32}$/i )
+		{
+			$is_valid = 0;
+			print "Tracker can only be a hexadecimal number with a length of 32.<br><br>\n";
+		}
+	}
+
+	if( $p =~ /^f[0-9]+$/ && $p ne $scanname && $p ne $tracker )
+	{
+		push @FPs, $p;
+	}
+}
+
+if( @FPs == 0 )
+{
+	$is_valid = 0;
+	print "No findings were selected as false positives. No action is being taken.<br><br>\n";
+}
+
+if( $is_valid )
+{
+	print "<heading>Marking False Positives</heading><br><br>\n";
+
+	my $dbh = DBI->connect("DBI:mysql:database=OpenDLP;host=localhost",$db_username,$db_password);
+	my $sth = "";
+	foreach( @FPs )
+	{
+		my $number = $_;
+		$number =~ s/^f//g;
+		my $string = "UPDATE results SET is_false=\"1\" WHERE number=? AND scan=? AND tracker=?";
+		$sth = $dbh->prepare( $string );
+		$sth->execute( $number, $scanname, $tracker );
+	}
+	print "Done marking findings as false positives. Go back and refresh the results to see the changes.<br>\n";
+
+	$sth->finish();
+	$dbh->disconnect();
+}
+
+#footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>td {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>small {color:#000000;font-family:arial;font-size:8pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0 onLoad=\"menu.toggleMe(\'scans\')\">\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}
+

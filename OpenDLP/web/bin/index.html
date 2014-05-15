@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+# Modifications by Charles Smith, N2 Net Security,Inc. 2011-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use CGI qw/:standard/;
+
+my $version = get_version();
+
+header();
+print "<heading>OpenDLP $version</heading><br><br>\n";
+print qq {
+<normal>OpenDLP is a free and open source, agent-based, centrally-managed, massively distributable data loss prevention tool released under the GPL. OpenDLP can identify sensitive data at rest on thousands of systems simultaneously. OpenDLP has two components:<br><br>
+<u>Web Application</u><br>
+<li>Automatically deploy and start agents over SMB</li>
+<li>When done, automatically stop, uninstall, and delete agents over SMB</li>
+<li>Pause, resume, and forcefully uninstall agents in an entire scan or on individual systems</li>
+<li>Concurrently and securely receive results from hundreds or thousands of deployed agents</li>
+<li>Create Perl-compatible regular expressions (PCREs) for finding sensitive data at rest</li>
+<li>Create reusable profiles for scans that include whitelisting or blacklisting directories and file extensions</li>
+<li>Review findings and identify false positives</li>
+<li>Export results as XML</li>
+<li>Manage Windows and UNIX agentless OS scans, Windows Metasploit agent scans, Windows agentless share scans, and database scans</li>
+<br>
+<u>Windows Agent</u><br>
+<li>Runs on Windows 2000 and later systems</li>
+<li>Written in C with no .NET Framework requirements</li>
+<li>Runs as a Windows Service at low priority so users do not see or feel it</li>
+<li>Resumes automatically upon system reboot with no user interaction</li>
+<li>Securely transmit results to web application at user-defined intervals</li>
+<li>Uses PCREs to identify sensitive data inside files</li>
+<li>Performs additional checks on potential credit card numbers to reduce false positives</li>
+<br>
+<u>Metasploit Agent</u><br>
+Everything the Windows Agent scan does, plus:<br>
+<li>Completely integreated with Metasploit through Messagepack RPC</li>
+<li>Retrieves list of exploited machines from Metasploit and displays in OpenDLP GUI</li>
+<li>Deploys OpenDLP directly from Metasploit to exploied machines of your choosing</li>
+<li>Domain credentials not required, if you can "get system" on the target from a metasploit ponsole, you can deploy OpenDLP</li>
+<br>
+<u>Agentless Database Scans</u><br>
+Starting with OpenDLP 0.3, you can now perform agentless data discovery against the following databases:
+<li>Microsoft SQL server databases: Supports authenticating to databases either with SQL server credentials (the "sa" account, for example) or with Windows OS (domain) credentials.</li>
+<li>MySQL</li>
+<br>
+<u>Agentless OS and Share Scans</u><br>
+Starting with OpenDLP 0.4, you can now perform agentless data discovery against the following systems:
+<li>Microsoft Windows operating systems over SMB</li>
+<li>UNIX operating systems over SSH</li>
+<li>Microsoft Windows network shares over SMB</li>
+<br>
+<u>To Get Started</u><br>
+Assuming the README has been followed and OpenDLP is properly installed on the web server, you can:
+<li><a href="regex-delete.html">Review existing PCREs</a> and <a href="regex.html">add your own</a></li>
+<li><a href="profiles.html">Create a profile</a> with PCREs, appropriate authentication credentials, and other policy settings</li>
+<li><a href="startscan.html">Start a scan</a> by providing a list of Windows systems</li>
+<li><a href="viewresults.html">Review results</a> and mark false positives</li>
+<li><a href="exportscan.html">Export the scan as XML</a> and use the data offline</li>
+<br>
+OpenDLP is maintained by <a href="mailto:andrew.opendlp\@gmail.com">Andrew Gavin</a> at <a href="http://opendlp.googlecode.com">http://opendlp.googlecode.com</a>.
+
+</normal>
+};
+footer();
+
+sub header
+{
+	print "Content-type: text/html\n\n";
+	print "<html>\n<head>\n";
+	print "<title>OpenDLP $version</title>\n";
+	print "<style>normal {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>heading {color:#000000;font-family:arial;font-size:16pt;background-color:#FFFFFF;}</style>\n";
+	print "<style>a {color:#000000;font-family:arial;font-size:10pt;background-color:#FFFFFF;}</style>\n";
+	print "</head>\n";
+	print "<BODY leftmargin=0 topmargin=0>\n";
+	print '<iframe src="sidebar.html" frameborder="0" align="left" width=175 height="100%" name=menu></iframe><table border=0 cellpadding=0 cellspacing=0><tr><td>' . "\n";
+}
+
+sub footer
+{
+	print "</td></tr></table></body></html>\n";
+}
+
+sub get_version
+{
+	open( V, "<../etc/version" );
+	my $v = <V>;
+	close( V );
+	chomp $v;
+	return $v;
+}

@@ -1,0 +1,216 @@
+#!/usr/bin/perl
+
+# Copyright Andrew Gavin 2009-2012
+#
+# This file is part of OpenDLP.
+#
+# OpenDLP is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenDLP is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with OpenDLP.  If not, see <http://www.gnu.org/licenses/>.
+
+
+print qq {
+
+.navcontainer {
+	margin: 0px;
+	padding: 0px;
+	width: 148px;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-top-style: solid;
+	border-right-style: solid;
+	border-bottom-style: none;
+	border-left-style: solid;
+	border-top-color: #000000;
+	border-right-color: #000000;
+	border-bottom-color: #000000;
+	border-left-color: #000000;
+	position: relative;
+	clear: both;
+	float: left;
+	display: inline;
+}
+.vertspace {
+	border-top-color: #FFFFFF;
+	border-right-color: #FFFFFF;
+	border-bottom-color: #FFFFFF;
+	border-left-color: #FFFFFF;
+	width: 148px;
+	height: 6px;
+	float: left;
+	position: relative;
+}
+.navheader {
+	color: #FFFFFF;
+	background-color: #000000;
+	font-family: arial;
+	font-size: 13px;
+	font-weight: bold;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-bottom-style: solid;
+	border-top-color: #000000;
+	border-right-color: #000000;
+	border-bottom-color: #000000;
+	border-left-color: #000000;
+	margin: 0px;
+	padding: 0px;
+	width: 148px;
+	clear: both;
+	float: left;
+	position: relative;
+	display: inline;
+}
+.nav {
+	color: #000000;
+	background-color: #666666;
+	font-family: arial;
+	font-size: 13px;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-bottom-style: solid;
+	border-top-color: #000000;
+	border-right-color: #000000;
+	border-bottom-color: #000000;
+	border-left-color: #000000;
+	margin: 0px;
+	padding: 0px;
+	width: 148px;
+	clear: both;
+	float: left;
+	position: relative;
+	display: inline;
+}
+.subnav {
+	color: #000000;
+	background-color: #999999;
+	font-family: arial;
+	font-size: 13px;
+	border-top-width: 0px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-top-style: solid;
+	border-right-style: none;
+	border-bottom-style: none;
+	border-left-style: none;
+	border-bottom-color: #000000;
+	padding: 0px;
+	width: 148px;
+	display: block;
+	position: relative;
+	clear: both;
+	float: left;
+	margin: 0px;
+	display: inline;
+}
+.subnav p {
+	margin: 00px;
+	padding: 0px;
+}
+.subnav A {
+	color: #000000;
+	text-decoration: none;
+	display: block;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-bottom-style: solid;
+	border-top-color: #000000;
+	border-right-color: #000000;
+	border-bottom-color: #000000;
+	border-left-color: #000000;
+}
+.subsubnav {
+	color: #000000;
+	background-color: #999999;
+	font-family: arial;
+	font-size: 13px;
+	border-top-width: 0px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-top-style: solid;
+	border-right-style: none;
+	border-bottom-style: none;
+	border-left-style: none;
+	border-bottom-color: #000000;
+	padding: 0px;
+	width: 148px;
+	display: block;
+	position: relative;
+	clear: both;
+	float: left;
+	margin: 0px;
+	display: inline;
+}
+.subsubnav p {
+	margin: 00px;
+	padding: 0px;
+}
+.subsubnav A {
+	color: #000000;
+	text-decoration: none;
+	display: block;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-bottom-style: solid;
+	border-top-color: #000000;
+	border-right-color: #000000;
+	border-bottom-color: #000000;
+	border-left-color: #000000;
+}
+.nav A {
+	color: #FFFFFF;
+	text-decoration: none;
+	display: block;
+}
+.text {
+	color: #000000;
+	background-color: #FFFFFF;
+	font-family: arial;
+	font-size: 10px;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	border-top-color: #000000;
+	border-right-color: #000000;
+	border-bottom-color: #000000;
+	border-left-color: #000000;
+	margin: 0px;
+	padding: 0px;
+	width: 148px;
+	clear: both;
+	float: left;
+	position: relative;
+	display: inline;
+}
+#subnav1 {
+	display: none;
+}
+#subnav2 {
+	display: none;
+}
+#subnav3 {
+	display: none;
+}
+};
